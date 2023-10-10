@@ -1,0 +1,181 @@
+<pre class='metadata'>
+Title: Enabling enum-string conversions wth <code>enum_traits</code>
+Abstract: This is a strawman proposal for a minimal set of enum traits we could have this decade.
+Editor: Hadriel Kaplan, hkaplan@juniper.net
+Shortname: ????
+Revision: 0
+Audience: LWG
+Status: P
+Group: WG21
+Date: 2023-10-10
+Markup Shorthands: markdown yes
+Markup Shorthands: biblio yes
+Repository: https://github.com/hadrielk/cpp-proposals.git
+</pre>
+
+Motivation
+==========
+
+I'm 52 years old. Before I retire, I'd like to be able to write the following as valid C++ code:
+
+```cpp
+    enum class Foo { One, Two };
+
+    void print_foo(Foo foo) {
+        std::cout << std::format("you got: {}", foo);
+    }
+
+    void cout_foo(Foo foo) {
+        std::cout << "you got: " << foo;
+    }
+```
+
+And I'd like to do that **without** having to use macros, nor specialize a `std::formatter<Foo>`, nor write separate code for every specific enum type.
+
+There are over 3000 enumeration types in my employer's codebase - writing code for each of them is a waste of my time, leads to mistakes, and is frankly *boring*.
+
+Why should humans have to do what machines can easily do for us? The C++ compiler is more than capable of saving us the time and effort.
+
+And while we're at it, how about if we could do this?:
+
+```cpp
+    template <class T>
+    concept IsEnum = std::is_enum_v<T>;
+
+    template <IsEnum EnumT>
+    auto as_enum(std::string_view sv) -> std::optional<EnumT> {
+        // some code I can write based on what this proposal provides
+    }
+
+    Foo parse_foo(std::string_view sv) {
+        return as_enum<Foo>(sv).value_or(Foo::One);
+    }
+```
+
+I don't think that's too crazy to expect before I retire. Do you?
+
+## Isn't reflection supposed to enable all that?
+
+Yes, yes it is. But the goal here is for me being able to do it before my retirement. Reflection is unlikely to meet that timeframe, given I only have a dozen years left (if I'm lucky).
+
+Furthermore, one shouldn't need to create an entire library infrastructure to do something so simple. Reflection is trying to boil the ocean, when all I want is a cup of tea.
+
+Converting enums to strings is something that C++ should have had for decades already. It's embarrassing that it does not already have this ability.
+
+
+Proposed Solution
+==========
+
+The tricky part with providing enum-to-string is that not everyone wants the output to be the same format/style. Some people will want the full `namespace_scope::enumeration::enumerator` name, others might want only the `enumeration::enumerator` names, and others might only want the `enumerator` name. Some people will want the enumerator name to be UPPERCASE, others lowercase. Etc.
+
+And then there's the issue of what to output if the given enumerator is not a valid value. We *could* specify to use something like "&lt;unknown&gt;", but some people might prefer to use a language other than English, or to throw an exception, or return a `std::optional<>`.
+
+So instead of picking only one way to do things, this paper proposes we let the users decide by just giving them some basic information as "enum traits", from which they can implement everything else via generic template code.
+
+And the only information they need is this:
+
+```cpp
+    namespace std {
+
+    template <class EnumT>
+    struct enum_traits {
+
+        struct value_id {
+            EnumT value;
+            string_view identifier;
+        };
+
+        // returns a span of sorted enumerator value-ids
+        static constexpr span<const value_id> enumerators();
+
+        // returns only the name of the enumeration, for example "Foo"
+        static constexpr string_view name();
+
+        // returns the fully-scoped name of the enumeration, which might be == name()
+        // for example "ns_1::ns_2::class_1::class_2::Foo", or "Foo" if global
+        static constexpr string_view scoped_name();
+    };
+
+    } // namespace std
+```
+
+Given the above, one can create generic library functions to do various things at both compile time and runtime, such as:
+
+    - Convert enum-to-string, in various output formats.
+    - Convert string-to-enum, from various input formats.
+    - Determine the total number of (distinct) enumerators.
+    - Determine the max and min enumerator values.
+    - Determine if the enumerator values are contiguous integers.
+    - Iterate over enumerator values, or identifiers, or both.
+    - Provide a generic `std::formatter` for all enum types, for `std::format()` to use.
+    - Choose various types of lookup tables to use based on number of enumerations and/or density of values.
+    - `static_assert()` various properties, such as that no two enumerator identifiers are the same if case is ignored.
+
+In fact we could do it all with just **two** functions: `enumerators()` and `scoped_name()`, since we could figure out the `name()` portion from the `scoped_name()`. But printing out just `Foo` for `Foo::One` is a fairly common need, compared to a full `ns_1::ns_2::class_1::Foo::One`.
+
+
+Details
+==========
+
+## Enumerators
+
+The `enumerators()` function returns a `std::span<const value_id>`, to an implementation-specific contiguous ordered backing array.
+
+Note that this `span` has a dynamic extent; however, since the size is known at compile time, this proposal could instead be changed to require a static-extent for the `span`. Or it could be changed to not use a `std::span` to begin with - it just seemed like a reasonable type to use for this strawman proposal.
+
+If the `enum` has two or more enumerators of duplicate underlying values, only one entry is created per distinct enumeration: the first one listed in the declaration per duplicate set. For example, `enum Foo { one, One = 0 };` yields a single `value_id` with the `value` of `Foo::one` and a `identifier` of "one".
+
+### Enumerator Ordering
+
+The backing array of `value_id`s must be ordered as if sorted by `std::less<std::underlying_type<EnumT>>` of the `value` member.
+
+The reason for doing this is to accomodate the most common use case: enum-to-string, when user code needs to lookup the enum value to find the corresponding string.
+
+Having a pre-sorted span makes that trivial to implement and reasonably performant for the extremely common cases of enums with either contiguous enumerators, or with a relatively-small set of discontiguous enumerators.
+For larger lists of discontiguous enumerators, if a binary-search is insufficient, the user can create some other data structure per their use-case needs.
+
+The point is we're simplifying and optimizing for the common cases, while making the less-common use-cases still possible.
+
+### Enumerator Identifier
+
+The `identifier` member of each `value_id` entry is the source declaration's `enumeration-list` `identifier` tokens encoded as UTF-8, with any universal-character-names decoded, and null-terminated.
+
+For example `enum apple { π, pi, PI };` yields three different `value_id`s with the three `identifier` member values of "\u03C0", "pi", and "PI".
+
+
+## Enumeration Name
+
+The `name()` function returns the enumerations `enum-name` token encoded as UTF-8, with any universal-character-names decoded, and null-terminated.
+
+## Enumeration Scoped-Name
+
+The `scoped_name()` function returns the `name()` prefixed by any enclosing class names and namespaces, and null-terminated. No distinction is made for anonymous namespaces.
+
+For example, `scoped_name()` for an `enum Foo` declared within a class `class_1` in namespace `ns_1` would yield "ns_1::class_1::Foo".
+
+## Further Details
+
+The proposed `enum_traits` should apply to both scoped and unscoped enumeration types, with or without a name. Personally I don't *care* about supporting unnamed enums, however, and I'm not sure anyone else would either.
+
+For consistency and to reduce bugs, every `string_view` in the above API must have a backing string that is null-terminated (i.e., `strlen(sv.data()) == sv.length()`).
+
+The storage of the actual backing array and strings is implementation specific, so long as they are available in both constant-expression and runtime contexts. Their lifetime must last for the duration of the program. In practice this means static storage, and some builtin functions.
+
+Note that the `name()` and `scoped_name()` functions can return sub-views of a single common backing string. For example a single backing string of "ns_1::ns_2::class_1::class_2::Foo" can be used for both, since they would both end after the "`Foo`". Or the implementation may decide to provide separate backing strings for each.
+
+## Attributes
+
+Support for attribute information, for either the enumeration or individual enumerators, is not being proposed. A future proposal can always add aditional constexpr functions to `enum_traits<>` or `value_id`, without breaking the API or ABI.
+
+
+Prior Work
+==========
+
+There have been proposals to provide this type of information for enums before: N3815, which led to the revisions N4027, N4113, and N4428. The further along they got, the more it became full reflection for the entire C++ type system and AST.
+
+Compared to N3815, the strawman proposal in this paper has the following differences:
+
+  * This proposal only provides a list of enumerator value-ids ordered by the underlying value, not by declaration order. N3815 provided a list in declaration order, because it believes that declaration order may be relevant. That well may be for some niche use case, but that's what it would be: a niche use case. The vast majority of use-cases have no need to know the declaration ordering, and I'd argue it's bad programming practice to begin with. Conversely, a list ordered by value is useful: it allows one to perform a binary-search for lookup, and to easily and efficiently determine the max and min values, whether they're contiguous, start at `0`, etc.
+  * This proposal provides a list of enumerator value-ids that ignores duplicates (enumerators with the same value as previous ones). N3815 supported the duplicates, because its returned list was simply the declared `enumerator-list`. Again, I believe that this is a niche use-case, and unnecessary for the majority of things programmers want to be able to do with enums. Full reflection will undoubtedly enable such things, in the future.
+  * This proposal returns `span` and `string_view` types, instead of having a `size()` method and using index template-params for getters and returning `const char*`. I think this is just a matter of how old N3815 is, but I'm not fixated on returning a `span` or `string_view`s anyway - it's just a strawman proposal.
+
