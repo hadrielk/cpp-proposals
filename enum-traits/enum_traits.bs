@@ -77,7 +77,7 @@ And the only information we need to do it all, is this:
 ```cpp
     namespace std {
 
-    template <typename EnumT>
+    template <class EnumT>
     struct enum_traits {
 
         struct value_id {
@@ -172,17 +172,15 @@ Ignored By This Proposal
 
 ## Attributes
 
-Support for attribute information, for either the enumeration or individual enumerators, is not being proposed. A future proposal can always add aditional constexpr functions, without breaking the API or ABI.
+Support for attribute information, for either the enumeration or individual enumerators, is not being proposed.
 
-## Distinguishing Scoped vs. Unscoped
-
-This proposal does not provide a way to determine if the enumeration is scoped or unscoped. Users can already determine that by checking whether the enumeration type is implicitly convertible to/from its underlying value.
+A future proposal can add a new `enumerator_attrs()` function or whatever, without breaking the API or ABI from this proposal; or wait for reflection.
 
 ## Duplicate Enumerators
 
-This proposal does not provide a way to determine if there are multiple enumerators with the same underlying value. I am unconvinced that we need such information for the vast majority of use-cases.
+This proposal does not provide a way to determine if there are multiple enumerators with the same underlying value. I am unconvinced that users need such information for the vast majority of use-cases.
 
-It can always be added in the future with a new `enumerator_decls()` function or whatever, without breaking the API or ABI.
+A future proposal can add a new `enumerator_decls()` function or whatever, without breaking the API or ABI from this proposal; or wait for reflection.
 
 Prior Work
 ==========
