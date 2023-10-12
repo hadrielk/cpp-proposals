@@ -96,7 +96,7 @@ It should also be relatively simple for compilers to implement, easy to understa
 Prior Work
 ==========
 
-A previous proposal [[P1819R0]] already proposed to add f-string support for C++, but in a different way than this paper.
+A previous proposal [[P1819R0]] already proposed to add f-string support for C++, but in a fundamentally different way than this one.
 
 [[P1819R0]] would make f-strings into first-class language constructs. An f-string would be interpolated and generate what is basically an unnamed lambda; one that satisfies a new "InterpolatedLiteral" concept. This unnamed callable would then be passed as a parameter to using functions that accept it and invoke it to do whatever. For example `std::ostream` would be modified to accept any type satisfying "InterpolatedLiteral", and thereby allow one to do "`std::cout << f"{bar}";`".
 
@@ -108,7 +108,7 @@ It's a much larger scope solution, which just so happens to also provide f-strin
 
 Because fundamentally [[P1819R0]] does what it says: it introduces support for string interpolation. Period. It has little to do with string formatting, f-strings, or `std::format()`; and arguably the "f" prefix used in the paper is misleading. It's just that one can use string interpolation to provide f-strings too - if one modifies all other consuming library code functions to handle the "InterpolatedLiteral" callable properly.
 
-This paper, on the other hand, only solves the problem at hand: using f-strings as a shorthand convenience replacement for `std::format()`.
+The new proposal in *this* document, however, only solves the problem at hand: using f-strings as a shorthand convenience replacement for `std::format()`.
 
 It does this in a simple, straight-forward manner. It is easy to easy to understand, easy to diagnose errors for, etc. It also supports format specifiers, including user-defined ones.
 
@@ -131,7 +131,64 @@ A non-exhaustive list of differences:
 But that's *ok*. Python f-strings also cannot do everything `str.format()` can do, and it hasn't caused mayhem nor prevented people from using f-strings.
 
 
-New Error Scenarios
+What about `std::print()` and such?
+==========
+
+I believe that a `std::format_string<>` is implicitly constructible from the `std::string` r-value an f-string would create (via the `std::format()` call), so f-strings should be usable in any function that accepts a `std::basic_format_string`.
+
+For example these should all work:
+```cpp
+    std::print(F"hello C++{23}");
+    std::println(F"hello C++{20 + 3}");
+    std::format_to(std::back_inserter(buffer), F"hello C++{20}");
+```
+
+What if you want to use `fmt` instead of `std`?
+==========
+
+As defined in this current proposal, one could not use a different library implementation in place of `std::format()`, such as `fmt::format()`.
+
+If we truly must support such an ability, I suppose we could make f-strings convert to using some new function name instead of `std::format`.
+
+But the standard library `<format>` would need to define that new function such that `std::format` would be invoked by-default if the user did not choose to override it.
+
+And since ADL cannot be used here, and since the function needs to be templated for the arguments, it might need to be something like this:
+```cpp
+// in header <format>
+namespace std {
+
+template <bool>
+struct f_string_selector {
+    template <class... Args>
+    static auto invoke(Args&&... args) {
+        return format(std::forward<Args>(args)...);
+    }
+};
+
+} // namespace std
+```
+
+And the user could do this to change it:
+```cpp
+// in user header
+namespace std {
+
+template <>
+struct f_string_selector<true> {
+    template <class... Args>
+    static auto invoke(Args&&... args) {
+        return fmt::format(std::forward<Args>(args)...);
+    }
+};
+
+} // namespace std
+```
+
+And of course f-strings would need to convert from `F"some {var}"` to `::std::f_string_selector<true>::invoke("some {}", var)`.
+
+
+
+Error Cases
 ==========
 
 In a few cases a user error for f-string use can be detected during conversion, but mostly only for malformed format string scenarios, such as a mismatched number of braces.
