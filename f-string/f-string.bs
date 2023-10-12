@@ -44,14 +44,14 @@ struct Foo {
 };
 ```
 
-In python they're called "formatted string literals", but generally known as f-strings. They are wildly popular in modern python, arguably moreso than the `str.format()` that the C++ `std::format()` was based on.
+In python they're called "formatted string literals", but generally known as f-strings. They are wildly popular in modern python; arguably more popular than the python `str.format()` that the C++ `std::format()` was based on.
 
-They're less verbose, the variable placements are easier to see, and they're more performant (for python).
+F-strings are less verbose, the variable usage placements are easier to see, and they're more performant (for python).
 
 IDEs and syntax highlighters support them as well, displaying the embedded expressions in a different color:
 
 ```python
-    F"{prefix}_{name}: got {calculate()} for {bits:#06x}"
+    f"{prefix}_{name}: got {calculate()} for {bits:#06x}"
 ```
 
 
@@ -62,7 +62,7 @@ The proposed solution is simple from a logical perspective: it's basically just 
 
 This:
 ```cpp
-    std::cout << F"{prefix}_{name}: got {calculate()} for {bits:#06x}"
+    std::cout << F"{prefix}_{name}: got {calculate()} for {bits:#06x}";
 ```
 
 Would be converted to this, between phase 6 and 7 of translation:
@@ -70,8 +70,8 @@ Would be converted to this, between phase 6 and 7 of translation:
     std::cout << ::std::format("{}_{}: got {} for {:#06x}", prefix, name, calculate(), bits);
 ```
 
-Slightly more formally (though by no means the proposed formal language):
-  
+The detailed idea and steps are as follows:
+
     1. An f-string is *not* a new string-literal sub-type, but the "F" appears in the same location as a string-literal encoding-prefix or "R" raw-string prefix. It denotes a new "f-string" type.
     2. Between translation phase 6 and 7, after concatenation of string-literals, all f-strings are converted as follows:
  
