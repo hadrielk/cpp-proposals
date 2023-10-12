@@ -5,7 +5,7 @@ Editor: Hadriel Kaplan, hkaplan@juniper.net
 Shortname: ????
 Revision: 0
 Audience: EWG
-Status: P
+Status: D
 Group: WG21
 Date: 2023-10-10
 Markup Shorthands: markdown yes
