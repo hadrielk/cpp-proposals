@@ -44,7 +44,7 @@ struct Foo {
 };
 ```
 
-In python they're called "formatted string literals", but generally known as f-strings. They are wildly popular in modern python; arguably more popular than the python `str.format()` that the C++ `std::format()` was based on.
+In python they're officially "formatted string literals", but generally known as f-strings. They are wildly popular in modern python; arguably more popular than the python `str.format()` that the C++ `std::format()` was based on.
 
 F-strings are less verbose, the variable usage placements are easier to see, and they're more performant (for python).
 
@@ -72,25 +72,30 @@ Would be converted to this, between phase 6 and 7 of translation:
 
 The detailed idea and steps are as follows:
 
-    1. An f-string is *not* a new string-literal sub-type, but the "F" appears in the same location as a string-literal encoding-prefix or "R" raw-string prefix. It denotes a new "f-string" type.
-    2. Between translation phase 6 and 7, after concatenation of string-literals, all f-strings are converted as follows:
+    * An f-string is *not* a new string-literal sub-type, but the "F" appears in the same location as a string-literal encoding-prefix or "R" raw-string prefix. It denotes a new "f-string" type.
+    * Between translation phase 6 and 7, after concatenation of string-literals, all f-strings are converted as follows:
  
-        a. The "F" is replaced with the character sequence "`::std::format(`", and a closing parenthesis "`)`" is placed after the double-quoted format string.
+        1. The "F" is replaced with the character sequence "`::std::format(`", and a closing parenthesis "`)`" is placed after the double-quoted format string.
         
-        b. The contents of the format string are parsed similarly to how `std::format()`'s format string is parsed, into a new format string.
-            - Except that the escape sequences "`{{`" and "`}}`" are not converted to single braces, but left as-is in the new format string.
+        2. Each character that is not part of a replacement-field is left alone, including double-brace escape sequences.
+
+        3. If a replacement-field begins with a digit, it is left alone.
+
+        4. If the replacement-field has a semi-colon `:`, that is *not* next to another semi-colon, then only the characters up to the last such standalone semi-colon are copied to output-arguments. The semi-colon and any characters beyond it in the replacement-field are left in the new format string.
+
+        5. Otherwise the contents of the replacement-field are copied verbatim to new output-arguments.
+
+        6. Each new output-argument created by the above steps, causes a comma "`,`" and the output-argument to be inserted before the trailing "`)`" inserted in step-1 above.
+
+        7. The opening and closing braces surrounding the replacement-field are also left in the new format string.
         
-        c. The content of replacement-fields between single braces, however, are copied verbatim from the opening `{` to the closing `}`, to new output-arguments.
-            - If the replacement-field begins with a digit, it is left alone.
-            - If the replacement-field has one or more semi-colon `:`, that are *not* next to another `:`, then only the characters up to the last such `:` are copied to output-arguments.
-            - Each new output-argument created by a replacement-field, causes a comma `,` and the output-argument to be inserted before the trailing "`)`" inserted in step-2a above.
-            - The opening and closing braces for the replacement-field are also left in the new format string.
-            - Any other character is left in the new format string.
-    3. After conversion, it is now an invocation of `std::format(<new-format-string>, <output-arg0>, ...)` and handled as such in a later phase.
+    * After conversion, it is now an invocation of `std::format(<new-format-string>, <output-arg0>, ...)` and handled as such in a later phase.
 
 That's it. No template code. No lambdas. No new C++ types.
 
 It should also be relatively simple for compilers to implement, easy to understand, and (hopefully) easy to standardize.
+
+Note that this proposal does not automatically make the definition of `std::format<>` available - i.e., the user must still `#include <format>`.
 
 
 Prior Work
@@ -125,10 +130,13 @@ F-strings cannot do everything `std::format()` can do.
 A non-exhaustive list of differences:
     1. Nested replacement fields are not supported in f-strings. I.e., `std::format("{:{}f}", pi, 10);)` cannot be represented as  `F"{pi:{10}f}"`.
     2. Preprocessor macros will not be expanded within f-strings. I.e., `F"{__LINE__}";` won't work.
-    3. An f-string cannot support wide-strings, unless we allow an encoding-prefix before the "F".
-    4. An f-string cannot handle runtime format strings, for obvious reasons.
+    3. An f-string cannot support wide strings, unless we allow an encoding-prefix before the "F".
+    4. An f-string's format string cannot be a raw-string. I.e., `std::format(R"(...)")` is not supported.
+    5. An f-string cannot handle runtime-only format strings, for obvious reasons.
 
-But that's *ok*. Python f-strings also cannot do everything `str.format()` can do, and it hasn't caused mayhem nor prevented people from using f-strings.
+Note that the same limitations affect [[P1819R0]] as well.
+
+But that's *ok*. Python f-strings also cannot do everything `str.format()` can do, and it hasn't caused mayhem nor prevented people from preferring f-strings.
 
 
 What about `std::print()` and such?
@@ -138,27 +146,27 @@ I believe that a `std::format_string<>` is implicitly constructible from the `st
 
 For example these should all work:
 ```cpp
-    std::print(F"hello C++{23}");
-    std::println(F"hello C++{20 + 3}");
-    std::format_to(std::back_inserter(buffer), F"hello C++{20}");
+    std::print(F"hello C++{20 + 6}");
+    std::println(F"hello C++{13 * 2}");
+    std::format_to(std::back_inserter(buffer), F"hello C++{26}");
 ```
 
-What if you want to use `fmt` instead of `std`?
+Customization Points
 ==========
 
-As defined in this current proposal, one could not use a different library implementation in place of `std::format()`, such as `fmt::format()`.
+As defined in this current proposal, there is no customization avialable - for example one could not use a different library implementation in place of `std::format()`, such as `fmt::format()`.
 
-If we truly must support such an ability, I suppose we could make f-strings convert to using some new function name instead of `std::format`.
+If we truly must support such an ability, we could make f-strings convert to some new function name instead of `std::format`.
 
 But the standard library `<format>` would need to define that new function such that `std::format` would be invoked by-default if the user did not choose to override it.
 
-And since ADL cannot be used here, and since the function needs to be templated for the arguments, it might need to be something like this:
+Since ADL cannot be used in this scenario, and since the function needs to be templated for the arguments, it might need to be something like this:
 ```cpp
 // in header <format>
 namespace std {
 
 template <bool>
-struct f_string_selector {
+struct f_string {
     template <class... Args>
     static auto invoke(Args&&... args) {
         return format(std::forward<Args>(args)...);
@@ -174,7 +182,7 @@ And the user could do this to change it:
 namespace std {
 
 template <>
-struct f_string_selector<true> {
+struct f_string<true> {
     template <class... Args>
     static auto invoke(Args&&... args) {
         return fmt::format(std::forward<Args>(args)...);
@@ -184,7 +192,7 @@ struct f_string_selector<true> {
 } // namespace std
 ```
 
-And of course f-strings would need to convert from `F"some {var}"` to `::std::f_string_selector<true>::invoke("some {}", var)`.
+And of course f-strings would need to convert from `F"some {var}"` to `::std::f_string<true>::invoke("some {}", var)`.
 
 
 
@@ -197,15 +205,14 @@ For *most* error cases, the error will only be detected in later translation pha
 
 Some of the new error cases that could arise with f-strings may not seem obvious to users at first glance.
 
-
-The most obvious one is that supporting arbitrary expressions inside of the replacement-field is not going to work for every possible expression.
+One potential for confusion is that not every arbitrary expression will work inside of the replacement-field.
 
 For example this:
 ```cpp
     F"{check() ? 2 : 6}";  // ERROR: converts, but fails to compile later
     F"{check() ? 2 : 6:}"; // ok
 ```
-The single `:` in the first case will be treated as separating an optional format-spec, which will convert but fail to compile later.
+The single semi-colon `:` in the first line will be treated as separating an optional format-spec, which will convert but fail to compile later.
 
 The previous example converts to this:
 ```cpp
@@ -235,3 +242,5 @@ And of course some silly things like this will fail:
     F"{\"}\"}";    // ERROR: conversion-parse error, mismatched braces
     F"{F\"bar\"}"; // ERROR: fails to compile later, since no second conversion occurs
 ```
+
+Note [[P1819R0]] would have the same issues as above, but with the error occuring in another area of code: wherever the unnamed callable is invoked.
