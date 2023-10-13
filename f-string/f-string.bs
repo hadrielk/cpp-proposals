@@ -18,35 +18,29 @@ Motivation
 
 Before this proposal:
 ```c++
-struct Foo {
-    std::string name;
-    uint64_t bits;
+std::string name;
+int calculate();
 
-    int calculate() const;
-
-    void display(std::string_view prefix) const {
-        std::cout << std::format("{}_{}: got {} for {:#06x}", prefix, name, calculate(), bits);
-    }
-};
+void display(std::string_view prefix, uint64_t bits) {
+    std::cout << std::format("{}_{}: got {} for {:#06x}", prefix, name, calculate(), bits);
+}
 ```
 
 After this proposal:
 ```cpp
-struct Foo {
-    std::string name;
-    uint64_t bits;
+std::string name;
+int calculate();
 
-    int calculate() const;
-
-    void display(std::string_view prefix) const {
-        std::cout << F"{prefix}_{name}: got {calculate()} for {bits:#06x}";
-    }
-};
+void display(std::string_view prefix, uint64_t bits) {
+    std::cout << F"{prefix}_{name}: got {calculate()} for {bits:#06x}";
+}
 ```
 
 In python they're officially "formatted string literals", but generally known as f-strings. They are wildly popular in modern python; arguably more popular than the python `str.format()` that the C++ `std::format()` was based on.
 
-F-strings are less verbose, the variable usage placements are easier to see, and they're more performant (for python).
+F-strings are less verbose, and more importantly: the variable usage placements are easier to see.
+
+For example, in the code snippets above, it's much easier to see in an f-strng that "`prefix`" goes before "`name`", and "`bits`" is displayed in hex.
 
 IDEs and syntax highlighters support them as well, displaying the embedded expressions in a different color:
 
