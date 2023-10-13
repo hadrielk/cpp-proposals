@@ -137,16 +137,21 @@ But that's *ok*. Python f-strings also cannot do everything `str.format()` can d
 What about `std::print()` and such?
 ==========
 
-I believe that a `std::format_string<>` is implicitly constructible from the `std::string` r-value an f-string would create (via the `std::format()` call), so f-strings should be usable in any function that accepts a `std::basic_format_string`.
+Functions such as `std::print()`, `std::println()`, etc., can accept a `std::basic_format_string` argument. The f-string's converted-to `std::format()` invocation will create an `std::string` r-value, but not as a constant expression - because `std::format()` is not a `constexpr` function.
 
-For example these should all work:
+But a `std::basic_format_string` is only implicitly convertible from an `std::string&&` r-value of a constant expression (the converting constructor is `consteval`).
+
+So one cannot use an f-string as an argument for these functions because they have no overload that would work:
 ```cpp
-    std::print(F"hello C++{20 + 6}");
-    std::println(F"hello C++{13 * 2}");
-    std::format_to(std::back_inserter(buffer), F"hello C++{26}");
+    std::print(F"hello C++{20 + 6}");   // ERROR
+    std::println(F"hello C++{13 * 2}"); // ERROR
+    std::format_to(std::back_inserter(buffer), F"hello C++{26}"); // ERROR
 ```
 
-Customization Points
+They could be made to work, however, if they were expanded to support overloads that took a single `std::string_view` argument; that should be possible to do without overload resolution ambiguity issues.
+
+
+Customization Point
 ==========
 
 As defined in this current proposal, there is no customization avialable - for example one could not use a different library implementation in place of `std::format()`, such as `fmt::format()`.
@@ -163,8 +168,8 @@ namespace std {
 template <bool>
 struct f_string {
     template <class... Args>
-    static auto invoke(Args&&... args) {
-        return format(forward<Args>(args)...);
+    static auto invoke(format_string<Args...> fmt, Args&&... args) {
+        return format(fmt, forward<Args>(args)...);
     }
 };
 
@@ -179,8 +184,8 @@ namespace std {
 template <>
 struct f_string<true> {
     template <class... Args>
-    static auto invoke(Args&&... args) {
-        return ::fmt::format(std::forward<Args>(args)...);
+    static auto invoke(::fmt::format_string<Args...> fmtstr, Args&&... args) {
+        return ::fmt::format(fmtstr, forward<Args>(args)...);
     }
 };
 
@@ -188,6 +193,71 @@ struct f_string<true> {
 ```
 
 And of course f-strings would need to convert from `F"some {var}"` to `::std::f_string<true>::invoke("some {}", var)`.
+
+# Isn't that string interpolation?
+
+The above customization mechanism is essentially a variant of generic string interpolation, somewhat similar to [[P1819R0]]; because a user could do whatever they want in their `f_string<true>::invoke()`.
+
+For example, they could choose a format-string "schema" and create overloads based on the first argument type as follows:
+```cpp
+// our "schema" pattern uses a F"<{arg}>..." prefix marker, or none
+std::string_view strip_marker(std::string_view fmt)
+{
+    if (fmt.starts_with("<{}>")) fmt.remove_prefix(4);
+    return fmt;
+}
+
+std::string colorize_fmt(std::string_view fmt)
+{
+    // some code that returns a new format string, with inserted ansi color codes
+    // wrapping each '{...}' braces replacement-field
+}
+
+// a dispatch tag for colorizing
+namespace tag { struct colorize_t{}; }
+static constexpr tag::colorize_t colorize;
+
+
+namespace std {
+
+// specialization to handle our f-string
+template <>
+struct f_string<true> {
+    // overload for custom locale
+    template <class... Args>
+    static auto invoke(string_view fmt, const locale& loc, Args&&... args) {
+        auto fmt2 = strip_marker(fmt);
+        return vformat(loc, fmt2, make_format_args(forward<Args>(args)...));
+    }
+
+    // overload for ansi colorization
+    template <class... Args>
+    static auto invoke(string_view fmt, ::tag::colorize_t, Args&&... args) {
+        auto fmt2 = colorize_fmt(strip_marker(fmt));
+        return vformat(fmt2, make_format_args(forward<Args>(args)...));
+    }
+
+    // plain format
+    template <class... Args>
+    static auto invoke(string_view fmt, Args&&... args) {
+        return vformat(fmt, make_format_args(forward<Args>(args)...));
+    }
+};
+
+} // namespace std
+
+
+// example usage
+void auf_deutsch(std::string_view name) {
+    static const std::locale de("de_DE");
+    std::cout << F"<{de}>Hallo Welt! Ich heiße {name}!\n";
+}
+
+void in_color(std::string_view name) {
+    std::cout << F"<{colorize}>Hello world! My name is {name}!\n";
+}
+```
+
 
 
 
@@ -220,6 +290,14 @@ Likewise the alternative tokens (digraphs) `<:` and `:>` can also cause issues f
     F"{my_vector<:42:>:}"; // ok
     F"{my_vector[42]}";    // ok
 ```
+
+Or the expression might end with a closing brace, and clash with the replacement-field's closing brace to appear as an escape-sequence:
+```cpp
+    F"{some_type{}}";  // ERROR: mismtached braces
+    F"{some_type{} }"; // ok
+    F"{some_type{}:}"; // ok
+```
+
 
 Another example is when a preprocessing macro is used within the f-string:
 ```cpp
