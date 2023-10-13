@@ -38,9 +38,9 @@ void display(std::string_view prefix, uint64_t bits) {
 
 In python they're officially "formatted string literals", but generally known as f-strings. They are wildly popular in modern python; arguably more popular than the python `str.format()` that the C++ `std::format()` was based on.
 
-F-strings are less verbose, and more importantly: the variable usage placements are easier to see.
+F-strings are less verbose, but more importantly, it is far easier to see the argument usage locations.
 
-For example, in the code snippets above, it's much easier to see in an f-strng that "`prefix`" goes before "`name`", and "`bits`" is displayed in hex.
+For example in the code snippets above, in the f-string case it is easier to see that "`prefix`" goes before "`name`", and "`bits`" is displayed in hex.
 
 IDEs and syntax highlighters support them as well, displaying the embedded expressions in a different color:
 
@@ -124,9 +124,10 @@ F-strings cannot do everything `std::format()` can do.
 A non-exhaustive list of differences:
     1. Nested replacement fields are not supported in f-strings. I.e., `std::format("{:{}f}", pi, 10);)` cannot be represented as  `F"{pi:{10}f}"`.
     2. Preprocessor macros will not be expanded within f-strings. I.e., `F"{__LINE__}";` won't work.
-    3. An f-string cannot support wide strings, unless we allow an encoding-prefix before the "F".
-    4. An f-string's format string cannot be a raw-string. I.e., `std::format(R"(...)")` is not supported.
-    5. An f-string cannot handle runtime-only format strings, for obvious reasons.
+    3. An f-string's format string cannot be a raw-string. I.e., `std::format(R"(...)")` is not supported in f-string form.
+    4. An f-string cannot support wide strings, unless we allow an encoding-prefix before the "F".
+    5. An f-string cannot use a different `std::locale`, unless we add support for customization points (see later section).
+    6. An f-string cannot handle runtime-only format strings, for obvious reasons.
 
 Note that the same limitations affect [[P1819R0]] as well.
 
@@ -163,7 +164,7 @@ template <bool>
 struct f_string {
     template <class... Args>
     static auto invoke(Args&&... args) {
-        return format(std::forward<Args>(args)...);
+        return format(forward<Args>(args)...);
     }
 };
 
@@ -179,7 +180,7 @@ template <>
 struct f_string<true> {
     template <class... Args>
     static auto invoke(Args&&... args) {
-        return fmt::format(std::forward<Args>(args)...);
+        return ::fmt::format(std::forward<Args>(args)...);
     }
 };
 
@@ -201,20 +202,18 @@ Some of the new error cases that could arise with f-strings may not seem obvious
 
 One potential for confusion is that not every arbitrary expression will work inside of the replacement-field.
 
-For example this:
+For example the first line of the following has a single semi-colon `:` between `2` and `6`, which will be treated as separating an optional format-spec, and will thus convert but fail to compile later:
 ```cpp
     F"{check() ? 2 : 6}";  // ERROR: converts, but fails to compile later
     F"{check() ? 2 : 6:}"; // ok
 ```
-The single semi-colon `:` in the first line will be treated as separating an optional format-spec, which will convert but fail to compile later.
-
-The previous example converts to this:
+Because the previous example converts to this:
 ```cpp
     ::std::format("{: 6}", check() ? 2);   // ERROR
     ::std::format("{:}", check() ? 2 : 6); // ok
 ```
 
-The alternative tokens (digraphs) `<:` and `:>` can also cause issues for similar reasons:
+Likewise the alternative tokens (digraphs) `<:` and `:>` can also cause issues for similar reasons:
 ```cpp
     // my_vector<:42:> is the same as my_vec[42] but using digraphs
     F"{my_vector<:42:>}";  // ERROR: fails to compile later
@@ -237,4 +236,4 @@ And of course some silly things like this will fail:
     F"{F\"bar\"}"; // ERROR: fails to compile later, since no second conversion occurs
 ```
 
-Note [[P1819R0]] would have the same issues as above, but with the error occuring in another area of code: wherever the unnamed callable is invoked.
+Note [[P1819R0]] would have the same issues as above, but with the errors occuring in another area of code: wherever the unnamed callable is invoked.
