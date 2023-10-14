@@ -1,0 +1,402 @@
+<pre class='metadata'>
+Title: F-strings for C++
+Abstract: This paper proposes f-strings for C++ in a simpler way than P1819; but *only* as f-strings, not as a general interpolation framework.
+Editor: Hadriel Kaplan, hkaplan@juniper.net
+Shortname: ????
+Revision: 1
+Audience: EWG
+Status: D
+Group: WG21
+Date: 2023-10-10
+Markup Shorthands: markdown yes
+Markup Shorthands: biblio yes
+Repository: https://github.com/hadrielk/cpp-proposals.git
+</pre>
+
+Motivation
+==========
+
+Before this proposal:
+```c++
+std::string name;
+int calculate();
+
+void display(std::string_view prefix, uint64_t bits) {
+    std::cout << std::format("{}_{}: got {} for {:#06x}", prefix, name, calculate(), bits);
+}
+```
+
+After this proposal:
+```cpp
+std::string name;
+int calculate();
+
+void display(std::string_view prefix, uint64_t bits) {
+    std::cout << F"{prefix}_{name}: got {calculate()} for {bits:#06x}";
+}
+```
+
+In python they're officially "formatted string literals", but generally known as f-strings. They are wildly popular in modern python; arguably more popular than the python `str.format()` that the C++ `std::format()` was based on.
+
+F-strings are less verbose, but more importantly, it is far easier to see the argument usage locations.
+
+For example in the code snippets above, in the f-string case it is easier to see that "`prefix`" goes before "`name`", and "`bits`" is displayed in hex.
+
+IDEs and syntax highlighters support them as well, displaying the embedded expressions in a different color:
+
+```python
+    f"{prefix}_{name}: got {calculate()} for {bits:#06x}"
+```
+
+
+Proposed Solution
+==========
+
+The proposed solution is simple from a logical perspective: it's basically just a fancy form of preprocessing.
+
+This:
+```cpp
+    std::cout << F"{prefix}_{name}: got {calculate()} for {bits:#06x}";
+```
+
+Would be converted to this, between phase 6 and 7 of translation:
+```cpp
+    std::cout << ::std::format("{}_{}: got {} for {:#06x}", prefix, name, calculate(), bits);
+```
+
+You can imagine this could have been done by the preprocessor, were the preprocessor capable of doing such work (which it cannot, obviously).
+
+
+The detailed idea and steps are as follows:
+
+    * An f-string is not a new string-literal sub-type, but the "F" appears in the same location as a string-literal encoding-prefix or "R" raw-string prefix. It denotes a new "f-string" type.
+
+        1. An f-string's string cannot span multiple lines, nor can two f-strings be concatenated into one f-string.
+
+        2. An f-string's string is a utf-8 sequence.
+
+    * Between translation phase 6 and 7, after concatenation of string-literals, all f-strings are "converted" as follows:
+ 
+        1. The "F" is replaced with the character sequence "`::std::format(`", and a closing parenthesis "`)`" is placed after the double-quoted format string.
+        
+        2. Each character that is not part of a replacement-field is left alone, including double-brace escape sequences.
+
+        3. If the first character (ignoring whitespace) is a left-parenthesis, then the contents up to a matching right-parenthesis are copied verbatim to a new output-argument, and the parentheses are removed.
+
+        3. Otherwise if the replacement-field has a colon `:`, that is *not* next to another colon, then only the characters up to the *first* such standalone colon are copied to an output-argument. The colon and any characters beyond it in the replacement-field are left in the new format string.
+
+        4. Otherwise the contents of the replacement-field are copied verbatim to a new output-argument.
+
+        5. Each new output-argument created by the above steps, causes a comma "`,`" and the output-argument to be inserted before the trailing "`)`" inserted in step-1 above.
+
+        6. The opening and closing braces surrounding the replacement-field are also left in the new format string.
+
+    * After conversion, it is now an invocation of `std::format(<new-format-string>, <output-arg0>, ...)` and handled as such in a later phase.
+
+That's it. No template code. No lambdas. No new C++ types.
+
+It should also be relatively simple for compilers to implement, easy to understand, and (hopefully) easy to standardize.
+
+Note that this proposal does not automatically make the definition of `std::format<>` available - i.e., the user must still `#include <format>`.
+
+Note: it may be more appropriate to perform the f-string conversion before phase 6, such as immediately following phase 4 preprocessing. (TBD)
+
+
+Prior Work
+==========
+
+A previous proposal [[P1819R0]] already proposed to add f-string support for C++, but in a fundamentally different way than this one.
+
+[[P1819R0]] would make f-strings into first-class language constructs. An f-string would be interpolated and generate what is basically an unnamed lambda; one that satisfies a new "InterpolatedLiteral" concept. This unnamed callable would then be passed as a parameter to using functions that accept it and invoke it to do whatever. For example `std::ostream` would be modified to accept any type satisfying "InterpolatedLiteral", and thereby allow one to do "`std::cout << f"{bar}";`".
+
+This unnamed pseudo-lambda would capture all variables by reference, and needs to be invoked by being given *another* callable, and that second callable is invoked with all the separate pieces of the interpolated literal. See [[P1819R0]] for the type of code one would need to write to handle this.
+
+While the proposed mechanism in [[P1819R0]] is clever and highly customizable after interpolation, it's also complicated to add support for, and does not support format specifiers. It would also be difficult to diagnose compilation errors for, because they would happen somewhere else in the middle of template-instantiated callable code.
+
+It's a much larger scope solution, which just so happens to also provide f-strings as essentially a side-effect.
+
+Because fundamentally [[P1819R0]] does what it says: it introduces support for string interpolation. Period. It has little to do with string formatting, f-strings, or `std::format()`; and arguably the "f" prefix used in the paper is misleading. It's just that one can use string interpolation to provide f-strings too - if one modifies all other consuming library code functions to handle the "InterpolatedLiteral" callable properly.
+
+The new proposal in *this* document, however, only solves the problem at hand: using f-strings as a shorthand convenience replacement for `std::format()`.
+
+It does this in a simple, straight-forward manner. It is easy to easy to understand, easy to diagnose errors for, etc. It also supports format specifiers, including user-defined ones.
+
+Unlike [[P1819R0]], the f-string in this paper ultimately generates what `std::format()` generates: a `std::string`.
+
+No library code needs to change to handle a callable. Nothing needs to be captured. There's no additional complexity.
+
+
+What Is Not Supported
+==========
+
+F-strings cannot do everything `std::format()` can do.
+
+A non-exhaustive list of differences:
+    1. Index-numbered replacement-fields are not supports.
+        - For example, `std::format("{0}{0}", x)` is not the same as `F"{x}{0}"`; the latter would become `format("{}{}", x, 0)`. One *can* do `F"{x}{x}"`, but that's not the same behavior.
+    2. Nested replacement fields are not supported.
+        - For example, `std::format("{:{}f}", pi, 10)` cannot be represented as  `F"{pi:{10}f}"`.
+    3. Preprocessor macros will not be expanded.
+        - For example, `F"{__LINE__}"` won't work.
+    4. An f-string's format string cannot be a raw-string.
+        - For example, `std::format(R"(...)")` is not supported in f-string form.
+    5. An f-string cannot be embedded within another.
+        - For example, `std::format("{}", std::format("{}", x))` cannot be `F"{F\"{x}\"}"`, but can be `F"{std::format(\"{}\", x)}"`.
+    5. An f-string cannot support wide strings, unless we allow an encoding-prefix before the "F".
+    6. An f-string cannot use a different `std::locale`.
+    7. An f-string cannot handle runtime-only format strings, for obvious reasons.
+
+Note that the same limitations apply to [[P1819R0]] as well.
+
+But that's *ok*. Python f-strings also cannot do everything `str.format()` can do, and it hasn't caused mayhem nor prevented people from preferring to use f-strings.
+
+
+Supporting Arbitrary Expressions
+==========
+
+Some concerns were raised on the mailing list regarding allowing arbitrary expressions in the replacement-field, vs. only identifiers/lvalues.
+
+This same concern also came up when python added f-strings. But full expressions were ultimately supported because they were deemed too useful to exclude.
+
+For example, the following types of f-strings would be very common:
+
+```cpp
+    F"number of entries: {vec.size()}";
+    F"{key} exists: {map.contains(key)}";
+    F"is valid: {opt.has_value()}";
+    F"iteration #{i + 1} out of {n}";
+    F"num missing: {total - found}"; 
+```
+
+Therefore, this proposal does support arbitrary expressions within f-string replacement-fields.
+
+Allowing them has some downsides, however:
+
+1. Some expressions will create syntactic ambiguity for parsing the replacement-field.
+2. Each expression string has to be fully tokenized, instead of becoming just an identifier token.
+3. Expressions can contain new tokens such as string-literals, but those were identified and concatenated already in earlier translation phases.
+4. Compilation failure of the expressions in later phases of translation would be harder to correlate to the f-string's literal text.
+5. Code obfuscation is easier to achieve.
+6. Raw source-code scanners (linters, indexers, etc.) would need to parse f-strings to detect the expressions.
+
+The above issues are discussed in more detail in later sections.
+
+
+## Handling Syntax Ambiguity
+
+Syntactic ambiguity can arise due to the following:
+
+1. The format-specifier starts with a single colon, but expressions may also have single colons in them.
+2. The replacement-field ends with a closing-brace, but expressions may also end with a closing-brace, making it appear as an escape-sequence.
+
+For example the first line of the following has a single colon `:` between `2` and `6`, which will be treated as separating an optional `format-spec`, and will thus convert but fail to compile later:
+```cpp
+    F"{check() ? 2 : 6}"; // ERROR: converts, but fails to compile later
+```
+Because the previous example converts to this:
+```cpp
+    ::std::format("{: 6}", check() ? 2); // ERROR
+```
+
+The same issue arose for python (due to their lambda syntax), and their chosen solution was to require any such expression to be wrapped by parentheses.
+
+This proposal chooses that same solution:
+```cpp
+    F"{(check() ? 2 : 6)}";      // ok
+    F"{(check() ? 2 : 6):#04x}"; // ok
+    F"{(some_type{})}";          // ok
+```
+
+The rationale for this is that (1) it is simple to parse and detect during translation, (2) it should look familiar to C++ programmers, and (3) it remains consistent with python just as `std::format()` does.
+
+
+## Tokenizing Expression Strings
+
+Expressions within replacement-fields are, of course, true C++ *expressions* that can contain all kinds of syntax, but they're initially just a substring of the f-string.
+
+Thus they need to be tokenized after extraction into new output-arguments, as does the overall "`::std::format("...", ...)`" output expression.
+
+Note that an expression can contain string-literals, including user-defined string-literals:
+```cpp
+    F"{foo(\"bar\") + \"one\" \"word\"}"; // allow?
+    F"{foo(\"bar\"sv)}";
+    F"{foo(\"bar\"_cs)}";
+```
+
+
+What about `std::print()` and such?
+==========
+
+Functions such as `std::print()`, `std::println()`, etc., can accept a `std::basic_format_string` argument. The f-string's converted-to `std::format()` invocation will create an `std::string` r-value, but not as a constant expression - because `std::format()` is not a `constexpr` function.
+
+But a `std::basic_format_string` is only implicitly convertible from an `std::string&&` r-value of a constant expression (the converting constructor is `consteval`).
+
+So one cannot use an f-string as an argument for these functions because they have no overload that would work:
+```cpp
+    std::print(F"hello C++{20 + 6}");   // ERROR
+    std::println(F"hello C++{13 * 2}"); // ERROR
+    std::format_to(std::back_inserter(buffer), F"hello C++{26}"); // ERROR
+```
+
+They could be made to work, however, if they were expanded to support overloads that took a single `std::string_view` or "string-like" argument; that should be possible to do without overload resolution ambiguity issues.
+
+
+Customization Points
+==========
+
+As defined in this proposal, there is no customization available. For example one could not use a different library implementation in place of `std::format()`, such as `fmt::format()`.
+
+Compiler implementations could offer a program-option or preprocessing directive to make the f-string conversion use a different function in place of `std::format`, should they wish to do so.
+
+One of the goals of f-strings is **simplicity**, for both implementation and use. Customization adds complexity instead.
+
+
+Future Proofing
+==========
+
+One concern raised on the mailing list regards future-proofing: what if a new `std::format2()` were created? How would we switch to that?
+
+I think the answer is: we would just update the specification to make it use `std::format2()`, for that version of C++. So long as the format-string syntax does not drastically change, this should not be an issue.
+
+Even in terms of ABI stability: so long as a standard library implementation does not itself *use* an f-string in its publicly visible code or ABI, its ABI would not change nor would we run afoul of the one-definition-rule.
+
+Because an f-string is not a C++ type or data structure. It cannot cross any boundaries. It is more akin to a preprocessing function-like macro; thus as long as no code in a library ever uses/invokes it, changing its behavior has no effect on that library.
+
+
+Why Not Generic Interpolation?
+==========
+
+There were several comments on the mailing list regarding modifying the proposal to be a more-general interpolation mechanism. That is what [[P1819]] does.
+
+While there may well be a need for that as well, it is not part of this proposal.
+
+And to be clear: that is *not* an f-string. The "f" in f-string stands for "format", as does the "F" prefix. That's what it is and does, by-definition. It is just a convenient shorthand, nothing more.
+
+If we wish to have a generic string-interpolation mechanism that happens to use a similar format-string syntax, that's fine - we could call them "x-string" (for "expand-string"), and use `X"{}"`. But that would be a different mechanism, and could be used in different use-cases.
+
+The reason this proposal is focused on *only* providing a shorthand for `std::format()`, is the simplicity it provides to implement in compilers, and to understand and use in code.
+
+In particular: users do not need to write any additional code to use an f-string. That is a significant advantage.
+
+Since the f-string converts to an invocation of `std::format`, one can think of an f-string as just a `std::string` prvalue, because that's what the `std::format()` call will return.
+
+Thus an f-string can be used in any scenario that a `std::string` prvalue can be used, including being implicitly converted to `std::string_view`. The one exception is it cannot be used in cases where a constexpr string is needed, since `std::format()` is not a `constexpr` function.
+
+
+Failure Cases
+==========
+
+In a few cases a user error for f-string use can be detected during conversion, but mostly only for malformed format string scenarios, such as a mismatched number of braces.
+
+For *most* failure cases, the error will only be detected in later translation phases.
+
+Some of the new failure cases that could arise with f-strings may not seem obvious to users at first glance.
+
+Note that [[P1819R0]] would have the same issues, but with the errors occuring in another area of code: wherever the unnamed callable is invoked.
+
+## Expression Syntax Clashes
+
+One potential for confusion is that not every arbitrary expression will work inside of the replacement-field.
+
+For example the first line of the following has a single colon `:` between `2` and `6`, which will be treated as separating an optional format-spec, and will thus convert but fail to compile later:
+```cpp
+    F"{check() ? 2 : 6}";   // ERROR: converts, but fails to compile later
+    F"{(check() ? 2 : 6)}"; // ok
+```
+Because the previous example converts to this:
+```cpp
+    ::std::format("{: 6}", check() ? 2);  // ERROR
+    ::std::format("{}", check() ? 2 : 6); // ok
+```
+
+And ternary expressions are not the only case a single colon can appear in C++ expresions. An even worse example is this:
+```cpp
+    F"{map.contains(\"a:b\")}";   // ERROR: converts, but fails to compile later
+    F"{(map.contains(\"a:b\"))}"; // ok
+```
+Because that converts to this:
+```cpp
+    ::std::format("{:b\")}", map.contains(\"a); // ERROR
+    ::std::format("{}", map.contains("a:b")); // ok
+```
+
+Likewise the alternative tokens (digraphs) `<:` and `:>` can also cause issues for similar reasons:
+```cpp
+    F"{my_vector[42]}";     // ok
+    F"{my_vector<:42:>}";   // ERROR: fails to compile later
+    F"{(my_vector<:42:>)}"; // ok
+```
+
+Or the expression might end with a closing brace, and clash with the replacement-field's closing brace to appear as an escape-sequence:
+```cpp
+    F"{some_type{}}";   // ERROR: mismtached braces
+    F"{some_type{} }";  // ok
+    F"{(some_type{})}"; // ok
+```
+
+## Macro Expansion
+
+Another example is when a preprocessing macro is used within the f-string:
+```cpp
+    #define MULT(x, y) x * y
+
+    F"{ MULT(1,2) }";         // ERROR: fails to compile later
+    F"{__FILE__}:{__LINE__}"; // ERROR: fails to compile later
+```
+Since preprocessing occurs before f-string conversion, and since the preprocessor will not perform macro expansion/replacement within literal strings, the above macro names will not be processed/replaced. Thus the user will get an error message in a later phase, when the compiler cannot resolve the macro name to a function.
+
+## Pathalogical Cases
+
+Of course some silly things like this will fail:
+```cpp
+    F"{\"}\"}";    // ERROR: conversion-parse error, mismatched braces
+    F"{F\"bar\"}"; // ERROR: fails to compile later, since no second conversion occurs
+```
+
+
+Safety Considerations
+==========
+
+F-strings do not add any new unsafe conditions that did not already exist for `std::format`. For example any access to invalid memory locations within replacement-field expressions would have also occured in explicit arguments to `std::format()`.
+
+The returned `std::string` from the f-string's converted-to `std::format()` call is a prvalue and subject to the lifetime rules for such.
+
+Raw source-code scanners do need to be updated to parse f-string content in order to detect the expressions within. If such a scanner is used for safety or compliance checks, it will need to be updated. However, this is also true for many new C++ language changes, so it should not be a surprise.
+
+
+Security Considerations
+==========
+
+Allowing f-strings to contain arbitrary C++ expressions within a literal string, and generating new code based on them, opens a new opportunity for code obfuscation.
+
+Consider:
+```cpp
+    std::cout << F"{key); if (map.contains(key)) abort(}";
+    if (map.contains(key)) { ... }
+```
+
+From a purely syntactic perspective, the above would be converted to this:
+```cpp
+    std::cout << ::std::format("{}", key); if (map.contains(key)) abort();
+    if (map.contains(key)) { ... }
+```
+
+Although this is a new avenue for obfuscation, similar obfuscation can already be achieved today with the preprocessor.
+
+The good news is that the format-string cannot be generated at runtime from external input. And being in the f-string is arguably more visible/exposed than via preprocessor macros.
+
+
+Changes
+==========
+
+## Changes From Draft Revision-0
+
+1. Changed the handling of the colon format-spec delimiter: in rev-0 the last standalone colon was considered the delimiter; whereas in rev-1 the *first* standalone colon is.
+
+    - This was done to follow the behavior of `std::format()`, to allow things like `F"The time is { chrono::system_clock::now() :HH:MM:SS}"`.
+
+2. Added the ability to use parentheses to wrap an expression, to avoid syntax ambiguity issues.
+
+3. Added several new sections based on discussion on the mailing list, as well as sections for safety and security.
+
+4. Removed the text and code example for a potential customization point. It wasn't technically part of the proposal, and added confusion I think.
