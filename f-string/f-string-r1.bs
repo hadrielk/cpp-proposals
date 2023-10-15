@@ -38,9 +38,15 @@ void display(std::string_view prefix, uint64_t bits) {
 }
 ```
 
-In python they're officially "formatted string literals", but generally known as f-strings. They are wildly popular in modern python; arguably more popular than the python `str.format()` that the C++ `std::format()` was based on.
+The above show two new mechanisms: an f-string and an x-string, denoted by `F""` and `X""` respectively.
 
-F-strings are less verbose, but more importantly, it is far easier to see the argument usage locations.
+F-strings are based on the same idea as python f-strings. They are wildly popular in modern python; arguably more popular than the python `str.format()` that the C++ `std::format()` was based on.
+
+X-strings (for "eXtracted String") have no equivalent in python. An x-string only extracts the expressions from the format-string, while an f-string invokes `std::format()` with them.
+
+In other words, `F"..."` is just a convenient shorthand for `std::format(X"...")`.
+
+The main benefit of f/x-strings is that it is far easier to see the argument usage locations.
 
 For example in the code snippets above, in the second example it is easier to see that "`prefix`" goes before "`name`", and "`bits`" is displayed in hex.
 
@@ -50,8 +56,6 @@ IDEs and syntax highlighters support them as well, displaying the embedded expre
     f"{prefix}_{name}: got {calculate()} for {bits:#06x}"
 ```
 
-The second case above used a `X""`, and are called x-strings (for "eXtracting String"). An x-string merely extracts the expressions from the format-string, while an f-string uses them to invoke `std::format()`.
-
 
 Proposed Solution
 ==========
@@ -60,17 +64,17 @@ The proposed solution is simple from a logical perspective: it's basically just 
 
 This:
 ```cpp
-    std::cout << F"{prefix}_{name}: got {calculate()} for {bits:#06x}";
+    F"{prefix}_{name}: got {calculate()} for {bits:#06x}";
     std::print(X"{prefix}_{name}: got {calculate()} for {bits:#06x}");
 ```
 
 Would be converted to this, between phase 6 and 7 of translation (or earlier, TBD):
 ```cpp
-    std::cout << ::std::format("{}_{}: got {} for {:#06x}", prefix, name, calculate(), bits);
+    ::std::format("{}_{}: got {} for {:#06x}", prefix, name, calculate(), bits);
     std::print("{}_{}: got {} for {:#06x}", prefix, name, calculate(), bits);
 ```
 
-You can imagine this could have been done by the preprocessor, were the preprocessor capable of doing such work (which it cannot, obviously).
+You can imagine this could have been done by the preprocessor, were the preprocessor capable of doing such transformation.
 
 
 The detailed idea and steps are as follows:
@@ -79,9 +83,7 @@ The detailed idea and steps are as follows:
 
         1. An f-string or x-string's string cannot span multiple lines.
 
-        2. Two such types cannot be string-literal-concatenated into one x-string or f-string, even if both are of the same type.
-
-        3. An f-string and x-string's string is a utf-8 sequence.
+        2. Two such types cannot be concatenated into one x-string or f-string, even if both are of the same type.
 
     * Between translation phase 6 and 7, after concatenation of string-literals, all f-strings are "converted" as follows:
 
@@ -89,7 +91,7 @@ The detailed idea and steps are as follows:
 
         2. The resultant `X"..."` is then processed as an x-string, per the next set of rules.
 
-    * Between translation phase 6 and 7, after concatenation of string-literals, all x-strings are "converted" as follows:
+    * After conversion of f-strings to x-strings, all x-strings are "converted" as follows:
 
         1. The "`X`" prefix character is removed.
 
@@ -107,7 +109,7 @@ The detailed idea and steps are as follows:
 
     * After conversion, the x-strings and f-strings will be converted to new code, tokenized, and handled in a later phase per usual.
 
-        1. All x-strings will just be an expanded sequence of `<new-format-string>, <output-arg0>, ...`.
+        1. All x-strings will now be an expanded sequence of `<new-format-string>, <output-arg0>, ...`.
 
         2. All f-strings will now be an invocation of `::std::format(<new-format-string>, <output-arg0>, ...)`.
 
@@ -116,34 +118,30 @@ That's it. No template code. No lambdas. No new C++ types.
 
 It should also be relatively simple for compilers to implement, easy to understand, and (hopefully) easy to standardize.
 
-Note that this proposal does not automatically make the definition of `std::format<>` available - i.e., the user must still `#include <format>`.
+Note that this proposal does not automatically make the definition of `std::format<>` available for f-strings - i.e., the user must still `#include <format>`.
 
-Note: it may be more appropriate to perform the f/x-string conversion before phase 6, such as immediately following phase 4 preprocessing. (TBD)
+Note: It may be more appropriate to perform the f/x-string conversion before phase 6, such as immediately following phase 4 preprocessing. (TBD)
 
 
-
-Prior Work
+Why Both F and X Strings?
 ==========
 
-A previous proposal [[P1819R0]] already proposed to add f-string support for C++, but in a fundamentally different way than this one.
+The initial draft began with *only* an f-string - i.e., always convert to invoking `std::format()`. Because that's the most common use-case, in the author's opinion, and follows what python does. The "f" literally stands for "format". That's what it is and does, by-definition.
 
-[[P1819R0]] would make f-strings into first-class language constructs. An f-string would be interpolated and generate what is basically an unnamed lambda; one that satisfies a new "InterpolatedLiteral" concept. This unnamed callable would then be passed as a parameter to using functions that accept it and invoke it to do whatever. For example `std::ostream` would be modified to accept any type satisfying "InterpolatedLiteral", and thereby allow one to do "`std::cout << f"{bar}";`".
+However, there was discussion on the mailing list regarding modifying the proposal to be a more-general interpolation mechanism. Concern was also raised about how to use the mechanism with `std::print()` and `println()` and such, which require a compile-time format-string and thus cannot use the `std::string` that `std::format()` would return, because `std::format()` is not a `constexpr` function.
 
-This unnamed pseudo-lambda would capture all variables by reference, and needs to be invoked by being given *another* callable, and that second callable is invoked with all the separate pieces of the interpolated literal. See [[P1819R0]] for the type of code one would need to write to handle this.
+As a compromise, this paper does *both*: it provides an x-string that expands to raw arguments usable for functions like `std::print()`, as well as an f-string that only uses them in `std::format()`.
 
-While the proposed mechanism in [[P1819R0]] is clever and highly customizable after interpolation, it's also complicated to add support for, and does not support format specifiers. It would also be difficult to diagnose compilation errors for, because they would happen somewhere else in the middle of template-instantiated callable code.
+At that point we *could* have removed f-strings and only proposed x-strings, and force users to either explicitly invoke `std::format()` or to create their own "f-string" using a perprocessor macro:
+```cpp
+#define F(s) ::std::format(X##s)
 
-It's a much larger scope solution, which just so happens to also provide f-strings as essentially a side-effect.
+std::cout << F("iteration #{i + 1} out of {n}\n");
+```
 
-Because fundamentally [[P1819R0]] does what it says: it introduces support for general string interpolation. Period. It has little to do with string formatting, f-strings, or `std::format()`; and arguably the "f" prefix used in the paper is misleading. It's just that one can use string interpolation to provide f-strings too - if one modifies all other consuming library code functions to handle the "InterpolatedLiteral" callable properly.
+But given how widely popular f-strings are in python, this proposal keeps an `F""`-based f-string as a native feature, with the expectation that they will be popular in C++.
 
-The new proposal in *this* document, however, only solves the problem at hand: using f-strings as a shorthand convenience replacement for `std::format()`, while also providing the inner x-string support so that functions like `std::print()` can be used.
-
-It does this in a simple, straight-forward manner. It is easy to easy to understand, easy to diagnose errors for, etc. It also supports format specifiers, including user-defined ones.
-
-Unlike [[P1819R0]], the f-string in this paper ultimately generates what `std::format()` generates: a `std::string`.
-
-No library code needs to change to handle a callable. Nothing needs to be captured. There's no additional complexity.
+Users do not need to write any additional code to use an f-string, nor preprocessor macros. And from an implementation perspective, supporting f-strings is relatively trivial since they're essentially a wrapper around x-string.
 
 
 What Is Not Supported
@@ -158,13 +156,13 @@ A non-exhaustive list of differences:
         - For example, `std::format("{:{}f}", pi, 10)` cannot be represented as  `F"{pi:{10}f}"`.
     3. Preprocessor macros will not be expanded.
         - For example, `F"{__LINE__}"` won't work.
-    4. An f/x-string's format string cannot be a raw-string.
+    4. The format-string cannot be a raw-string.
         - For example, `std::format(R"(...)")` is not supported in f-string form.
     5. An f/x-string cannot be embedded within another.
         - For example, `std::format("{}", std::format("{}", a))` cannot be `F"{F\"{a}\"}"`, but can be `F"{std::format(\"{}\", a)}"`.
-    5. An f/x-string cannot support wide strings, unless we allow an encoding-prefix before the "F".
-    6. An f/x-string cannot use a different `std::locale`.
-    7. An f/x-string cannot handle runtime-only format strings, for obvious reasons.
+    5. Wide strings are not supported, unless we allow an encoding-prefix before the "F" and "X".
+    6. A different `std::locale` cannot be used.
+    7. Runtime-only format-strings cannot be used, for obvious reasons.
 
 Note that the same limitations apply to [[P1819R0]] as well.
 
@@ -178,7 +176,7 @@ Some concerns were raised on the mailing list regarding allowing arbitrary expre
 
 This same concern also came up when python added f-strings. But full expressions were ultimately supported because they were deemed too useful to exclude.
 
-For example, the following types of f-strings would be very common:
+For example, the following types of uses would be very common:
 
 ```cpp
     F"number of entries: {vec.size()}";
@@ -195,9 +193,9 @@ Allowing them has some downsides, however:
 1. Some expressions will create syntactic ambiguity for parsing the replacement-field.
 2. Each expression string has to be fully tokenized, instead of becoming just an identifier token.
 3. Expressions can contain new tokens such as string-literals, but those were identified and concatenated already in earlier translation phases.
-4. Compilation failure of the expressions in later phases of translation would be harder to correlate to the f-string's literal text.
+4. Compilation failure of the expressions in later phases of translation would be harder to correlate to the f/x-string's literal text.
 5. Code obfuscation is easier to achieve.
-6. Raw source-code scanners (linters, indexers, etc.) would need to parse f-strings to detect the expressions.
+6. Raw source-code scanners (linters, indexers, etc.) would need to parse f/x-strings to detect the expressions.
 
 The above issues are discussed in more detail in later sections.
 
@@ -234,7 +232,7 @@ The rationale for this is that (1) it is simple to parse and detect during trans
 
 Expressions within replacement-fields are, of course, true C++ expressions that can contain all kinds of syntax, but they're initially just a substring of the x-strings.
 
-Thus they need to be tokenized after extraction into new output-arguments, as does the overall "`::std::format("...", ...)`" output expression for f-strings.
+Thus they need to be (re)tokenized after extraction into new output-arguments, as does the overall "`::std::format("...", ...)`" output expression for f-strings.
 
 Note that an expression can contain string-literals, including user-defined string-literals:
 ```cpp
@@ -244,33 +242,10 @@ Note that an expression can contain string-literals, including user-defined stri
 ```
 
 
-Why Both F and X Strings?
-==========
-
-The initial draft began with *only* an f-string - i.e., always convert to invoking `std::format()`. Because that's the most common use-case, in the author's opinion, and follows what python does. The "f" literally stands for "format". That's what it is and does, by-definition.
-
-However, there were several comments on the mailing list regarding modifying the proposal to be a more-general interpolation mechanism. Concern was also raised about how to use the mechanism with `std::print()` and `println()` and such, which require a compile-time format-string and thus cannot use the `std::string` that `std::format()` would return, because `std::format()` is not a `constexpr` function.
-
-As a compromise, this paper does *both*: it provides an x-string that expands to raw arguments usable for functions like `std::print()`, as well as an f-string that only uses them in `std::format()`.
-
-At that point we *could* have removed f-strings and only proposed x-strings, and force users to either explicitly invoke `std::format()` or to create their own "f-string" using as a macro:
-```cpp
-#define F(s) ::std::format(X##s)
-
-std::cout << F("iteration #{i + 1} out of {n}\n");
-```
-
-But given how widely popular f-strings are in python, this proposal keeps an `F""`-based f-string as a native feature, with the expectation that they will be popular in C++.
-
-Users do not need to write any additional code to use an f-string, nor preprocessor macros. And from an implementation perspective, supporting f-strings is relatively trivial since they're essentially a wrapper around x-string.
-
-
 Customization Points
 ==========
 
 As defined in this proposal, there is no customization available. For example one could not use a different library implementation in place of `std::format()` for f-strings, such as `fmt::format()`.
-
-One of the goals of f/x-strings is **simplicity**, for both implementation and use.
 
 The user can instead invoke `fmt::format(X"...")` should they wish to, or even create a preprocessing function-like macro such as:
 ```cpp
@@ -394,7 +369,37 @@ From a purely syntactic perspective, the above would be converted to this:
 
 Although this is a new avenue for obfuscation, similar obfuscation can already be achieved today with the preprocessor.
 
-The good news is that the format-string cannot be generated at runtime from external input. And being in the f-string is arguably more visible/exposed than via preprocessor macros.
+The good news is that the format-string cannot be generated at runtime from external input. And being in the f-string makes it more visible/exposed than via preprocessor macros.
+
+
+Prior Work
+==========
+
+A previous proposal [[P1819R0]] already proposed to add f-string support for C++, but in a fundamentally different way than this one.
+
+[[P1819R0]] would make f-strings into first-class language constructs. An f-string would be interpolated and generate what is basically an unnamed lambda; one that satisfies a new "InterpolatedLiteral" concept. This unnamed callable would then be passed as a parameter to using functions that accept it and invoke it to do whatever. For example `std::ostream` would be modified to accept any type satisfying "InterpolatedLiteral", and thereby allow one to do "`std::cout << f"{bar}";`".
+
+This unnamed pseudo-lambda would capture all variables by reference, and needs to be invoked by being given *another* callable, and that second callable is invoked with all the separate pieces of the interpolated literal. See [[P1819R0]] for the type of code one would need to write to handle this.
+
+While the proposed mechanism in [[P1819R0]] is clever and highly customizable after interpolation, it's also complicated to add support for, and does not support format specifiers. It would also be difficult to diagnose compilation errors for, because they would happen somewhere else in the middle of template-instantiated callable code.
+
+It's a much larger scope solution, which just so happens to also provide f-strings as essentially a side-effect.
+
+Because fundamentally [[P1819R0]] does what it says: it introduces support for general string interpolation. Period. It has little to do with string formatting, f-strings, or `std::format()`; and arguably the "f" prefix used in the paper is misleading. It's just that one can use string interpolation to provide f-strings too - if one modifies all other consuming library code functions to handle the "InterpolatedLiteral" callable properly.
+
+The new proposal in *this* document, however, only solves the problem at hand: using f-strings as a shorthand convenience replacement for `std::format()`, while also providing the inner x-string support so that functions like `std::print()` can be used.
+
+It does this in a simple, straight-forward manner. It is easy to easy to understand, easy to diagnose errors for, etc. It also supports format specifiers, including user-defined ones.
+
+Unlike [[P1819R0]], the f-string in this paper ultimately generates what `std::format()` generates: a `std::string`.
+
+No library code needs to change to handle a callable. Nothing needs to be captured. There's no additional complexity.
+
+
+Acknowledgements
+==========
+
+I would like to thank the members of the std-proposals maling list for their time and discussion. Their feedback significantly improved the proposed solution.
 
 
 Changes
@@ -402,7 +407,7 @@ Changes
 
 ## Changes From Draft Revision-0
 
-1. Added the notion of an x-string ("eXtracted String" or "eXpanded String") separate from an f-string, based on discussions on the mailing list.
+1. Added the notion of an x-string ("eXtracted String" or "eXpanded String"?) separate from an f-string, based on discussions on the mailing list.
 
 2. Changed the handling of the colon format-spec delimiter: in rev-0 the last standalone colon was considered the delimiter; whereas in rev-1 the *first* standalone colon is.
 
@@ -413,10 +418,3 @@ Changes
 4. Added several new sections based on discussion on the mailing list, as well as sections for safety and security.
 
 5. Removed the text and code example for a potential customization point. It wasn't technically part of the proposal, and added confusion I think.
-
-
-Acknowledgements
-==========
-
-I would like to thank the people on the std-proposals maling list for their time and discussion. Their feedback significantly improved the proposed solution.
-
