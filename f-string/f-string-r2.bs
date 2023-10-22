@@ -88,7 +88,7 @@ Note that this proposal does not automatically make the definition of `std::form
 We define two new *preprocessing-tokens*:
 
     1. An *f-string-literal* for `F"..."`.
-    
+
     2. An *x-string-literal* for `X"..."`.
 
 Both types may also be combined with `R` as `FR""` or `XR""` to indicate raw string contents, as well as an *encoding-prefix*, for example `u8F""` or `LXR""`.
@@ -98,7 +98,7 @@ The lexer creates such tokens in translation phase-3.
 We also define two new builtin operators in the preprocessor:
 
     1. A variadic `_Concat()` operator, that accepts one or more string-literals of the same type and encoding, and concatenates them into one new longer string-literal preprocessing-token of that type and encoding.
-    
+
         - Note that this could almost be accomplished with a macro today, but macros cannot concatenate two string-literal tokens because the result would not be a valid preprocessing-token.
 
     2. An `_Xtract()` operator, similar to the current `_Pragma()` operator, that accepts a single f-string-literal or x-string-literal preprocessing-token, modifies the string, and passes the modified string through phase-3 lexing and macro-invocation expansion.
@@ -138,8 +138,9 @@ A non-exhaustive list of differences:
     2. An f/x-string cannot be embedded within another.
         - For example, `std::format("{}", std::format("{}", a))` cannot be `F"{F\"{a}\"}"`, but can be `F"{std::format(\"{}\", a)}"`.
     3. String-literal types other than f/x-string-literals cannot be concatenated with f/x-string-literals.
-    4. A different `std::locale` cannot be used, for f-strings.
-    5. Runtime-only format-strings cannot be used, for obvious reasons.
+    4. User-defined string-literals are not supported as the interpolation-string or generated format-string.
+    5. A different `std::locale` cannot be used, for f-strings.
+    6. Runtime-only format-strings cannot be used, for obvious reasons.
 
 But that's *ok*. Python f-strings also cannot do everything `str.format()` can do, and it hasn't caused mayhem nor prevented people from preferring to use f-strings.
 
@@ -187,7 +188,7 @@ Users also likely expect it to behave like textual transformation, as if it repl
 Performing the interpolation within the preprocessor does have some drawbacks:
     * Multiple, separate string-literals must all be of the same type: an f-string-literal or x-string-literal.
     * Macros cannot be used to create separate string-literals for the f/x-string-literal in all cases.
-    * We cannot prevent "creative" uses of the f/x-string from generating nearly-arbitrary code.
+    * We cannot prevent "creative" uses of the f/x-string from generating fairly arbitrary code, or invalid code.
 
 These issues are detailed in the next sub-sections.
 
@@ -246,48 +247,47 @@ The reasons for this restriction are:
 
 ### Constraining What F/X-Strings Can Do
 
-The contents of the f/x-strings may include arbitrary code, such that the resulting sequence of tokens do more than what this proposal's purpose intends.
+The contents of the f/x-strings may include fairly arbitrary code, such that the resulting sequence of tokens do more than what this proposal's purpose intends.
 
 For example, this generates more arguments than the format-string has replacement fields for, which will even successfully compile later because it is allowed:
 ```cpp
-    std::print(X"{foo, bar}");
-    // => std::print("{}", foo, bar); // ok, extra arg is ignored by print()
+    std::print(X"{foo, func()}");
+    // => std::print("{}", foo, func()); // ok, extra arg is ignored by print()
+
+    return F"{foo, func()}";
+    // => return std::format("{}", foo, func()); // ok, extra arg is ignored by format()
 ```
 
-And this example does something else entirely:
+Note that the extra `func()` above would still be invoked, and side-effects still occur.
+
+
+And this example uses the comma operator's behavior to perform unrelated work:
 ```cpp
-    std::cout << F"{key); if (map.contains(key)) abort(}";
-    if (map.contains(key)) { ... }
+    if (X"{func()}{check()}") return;
 ```
 
 The above would be converted to this:
 ```cpp
+    if ("{}{}", func(), check()) return; // ok, but weird
+```
+
+Due to the `"{}{}"` string-literal above having no effect, some implementations might generate a diagnostic, but not all do. For example, by default `clang` generates a warning, but `gcc` and `msvc` do not.
+
+However this proposal *does* require the `_Xtract()` operator to verify the final output tokens have balanced parentheses, braces, and brackets.
+
+Thus the following scenario is prevented:
+```cpp
+    std::cout << F"{key); if (map.contains(key)) abort(}"; // ERROR
+    if (map.contains(key)) { ... }
+
+    // the above would have generated this if it were allowed:
     std::cout << ::std::format("{}", key); if (map.contains(key)) abort();
     if (map.contains(key)) { ... }
 ```
 
-While it may be technically possible to prevent such cases, we believe it is reasonable to allow them instead, for the following reasons:
+The rationale for preventing the above is to detect errors at the point of use, since mismatched delimeters are likely programmer error.
 
-    1. The same behavior can be achieved with traditional macro expansion today.
-
-    2. It is arguably a feature, not a bug.
-    
-        - This is not a teachability issue nor poor default behavior - the programmer is explicitly writing that code into the format string.
-
-        - If a programmer wishes to use f/x-strings to perform unconventional transformations, for whatever reason, they should be free to do so. It's their code.
-
-        - Programmers might find creative uses for this ability, that we cannot foresee.
-
-    3. It is not clear that we can actually prevent it, from a practical point of view.
-    
-        - We cannot, for example, require the output of conversion to allow only post-processing tokens of expresssions, because macro expansion might have created multiple separate string-literals as well.
-
-        - If we created a specific list of what was allowed, we would have to potentially update this list for every future C++ version, and possibly omit some valid new ones.
-
-        - One thing that might be reasonable to do, is require the final generated tokens to have balanced tokens for parentheses, braces, and brackets.
-
-    4. It is not the role of the preprocessor to prevent such cases. For example, if this change becomes adopted by WG14 some time later for the C-preprocessor, it could not reuse the same implementation because the language grammar is different.
-
+Of course another option is for this proposal to only require diagnostics in such cases, but still allow it.
 
 
 Grammar
@@ -300,36 +300,199 @@ The *preprocessing-token* in [lex.pptoken] is extended to include:
 
 A new section within Preprocessing Directives [cpp] titled "F/X String Literal Processing" is added with the following grammar:
 
-    *f-string*:
-        F " *fx-format-string* "
-    *x-string*:
-        X " *fx-format-string* "
-    *fx-format-string*:
-        *extraction-field*
-        *extraction-field* *fx-format-string*
-        *fx-format-char*
-        *fx-format-char* *fx-format-string*
-    *fx-format-char*:
-        *fmt-escape*
-        *c-char*
-    *fmt-escape*:
-        { {
-        } }
-    *extraction-field*:
-        { *output-argument* format-specifier<sub>opt</sub> }
-    *output-argument*:
-        ( *expression* )
-        *expression*
-    *format-string*:
-        *the character sequence for a "format string" defined in [format.string]*
+    : *f-string*:
 
+    ::    *encoding-prefix*<sub>opt</sub> F R<sub>opt</sub> " *interpolation-string* "
+
+    : *x-string*:
+
+    ::    *encoding-prefix*<sub>opt</sub> X R<sub>opt</sub> " *interpolation-string* "
+
+    : *interpolation-string*:
+
+    ::    *extraction-field*
+
+    ::    *extraction-field* *interpolation-string*
+
+    ::    *fmt-char*
+
+    ::    *fmt-char* *interpolation-string*
+
+    : *fmt-char*:
+
+    ::    *fmt-escape*
+
+    ::    *c-char*
+
+    : *fmt-escape*:
+
+    ::    { {
+
+    ::    } }
+
+    : *extraction-field*:
+
+    ::    { *output-argument* format-specifier<sub>opt</sub> }
+
+    : *output-argument*:
+
+    ::    ( *expression* )
+
+    ::    *expression*
+
+    : *format-string*:
+
+    ::    *the character sequence for a "format string" defined in [format.string]*
+
+
+New Preprocessor Operators
+==========
+
+## The Concat operator
+
+
+A new builtin preprocessor `_Concat()` unary operator is proposed, which concatenates two or more *preprocessing-token*s into one output *preprocessing-token*, for specific token types.
+
+It is logically similar to the `##` operator, but with the following differences:
+
+    - Arguments are substituted via full macro expansion before concatenation; whereas the `##` operator inhibits argument substitution.
+
+    - Two or more *string-literal*s are concatenated into a new *string-literal*, for specific supported combinations; whereas the `##` operator does not support concatenating two *string-literal*s of any type.
+
+    - Concat is left-associative for order-of-precedence, while `##` operator is unspecified for such.
+
+Note that the Concat operator does support concatenating two or more *identifier*s without any *string-literal*s. In that sense it is identical to the `##` operator except for also performing argument substition. This latter difference makes it generally useful, to avoid needing an extra macro for indirection.
+
+
+The Concat operator has the expression form:
+```
+        _Concat( pp-tokens )
+```
+
+Before `_Concat()` invocation, the arguments are processed per the rules for Argument Substituion [cpp.subst], as is done for arguments of function-like macros.
+
+After argument substitution is complete, the new *pp-tokens* must be valid *concat-args*, per the following grammar:
+
+
+    : *concat-args*:
+        :: *string-literal-list*
+        :: *identifier-string-list*
+        :: *identifier-list*
+
+    : *identifier-string-list*:
+        :: *identifier-list* , *string-literal-list*
+
+    : *string-literal-list*:
+        :: *f-string-literal-list*
+        :: *x-string-literal-list*
+        :: *other-string-literal-list*
+
+    : *f-string-literal-list*:
+        :: *f-string-literal*
+        :: *f-string-literal* , *f-string-literal-list*
+
+    : *x-string-literal-list*:
+        :: *x-string-literal*
+        :: *x-string-literal* , *x-string-literal-list*
+
+    : *other-string-literal-list*:
+        :: *other-string-literal*
+        :: *other-string-literal* , *other-string-literal-list*
+
+    : *other-string-literal*:
+        :: *any string-literal other than f-string-literal or x-string-literal*
+
+Note: The above grammar does not allow mixing of *f-string-literal*s with *x-string-literal*s, nor can either be mixed with *other-string-literal*s. One or more *identifier*s may appear before *string-literal* types, but not after; or the args can be comprised of only *identifier*s, or only *string-literal* types.
+
+
+The `_Concat()` invocation then begins with the *concat-args* for arguments, and performs the following:
+
+    * If the *concat-args* is an *identifier-list*, processing follows the rules in "Identifier Concatenation" below.
+
+    * If the *concat-args* is a *string-literal-list*, processing follows the rules in "String-literal Concatenation" below.
+
+    * If the *concat-args* is an *identifier-string-list*:
+
+        1. The *identifier-list* portion is processed as per "Identifier Concatenation" below.
+
+        2. The *string-literal-list* portion is processed as per "String-literal Concatenation" below.
+
+        3. The resulting *identifier* is concatenated with the resulting *string-literal* to produce a new *string-literal* token.
+
+            - For example, a `_Concat(L, X, "foo", "bar")` would generate the *string-literal* token `LX"foobar"`.
+
+            - But `_Concat(A, "foo", "bar")` would produce an error, because `A"foobar"` is not a valid *string-literal* token.
+
+    * The resulting *identifier* or *string-literal* replaces the original sequence of tokens from `_Concat( pp-tokens )`.
+
+
+### Identifier Concatenation
+
+If there is only one *identifier* in the *identifier-list*, it is left alone and identifier concatenation is complete.
+
+Otherwise, each *identifier* in the *identifier-list* is concatenated together left-to-right to form a single *identifier*, without further macro expansion, and the resulting *identifier* replaces the *identifier-list*.
+
+In other words, the result is logically equivalent to the `##` operator being applied between each *identifier*, if there is more than one.
+
+
+### String-literal Concatenation
+
+Note: The following describes the logical behavior, but implementations may perform their own logic so long as the results are the same.
+
+Each *string-literal* in the *string-literal-list* is processed sequentially as follows:
+
+    1. If there is no *string-literal* following the current one, the current *string-literal* replaces the original *string-literal-list* and concatenation is complete.
+
+    2. If the current *string-literal* is an *f-string-literal*:
+
+        a. If the next *string-literal* is not an *f-string-literal*, the program is ill-formed.
+
+        b. The current and next *f-string-literal*s are modified to be *other-string-literal*s by removing the 'F' prefix.
+
+        c. The two *other-string-literal*s are concatenated as as described in (4) below.
+
+        d. The resulting *other-string-literal* is converted back to an *f-string-literal*, by inserting an 'F' in the appropriate spot.
+
+    3. If the current *string-literal* is an *x-string-literal*:
+
+        a. If the next *string-literal* is not an *x-string-literal*, the program is ill-formed.
+
+        b. The current and next *f-string-literal*s are modified to be *other-string-literal*s by removing the 'X' prefix.
+
+        c. The two *other-string-literal*s are concatenated as as described in (4) below.
+
+        d. The resulting *other-string-literal* is converted back to an *x-string-literal*, by inserting an 'X' in the appropriate spot.
+
+    4. If the current *string-literal* is an *other-string-literal*:
+
+        a. A common *encoding-prefix* for the resulting concatenated *string-literal* is determined based on the current and next *string-literal*:
+
+            - If both literals have the same *encoding-prefix*, the common *encoding-prefix* is that one.
+
+            - If one literal has no *encoding-prefix*, the common *encoding-prefix* is that of the other's.
+
+            - Any other combination is ill-formed.
+
+        b. If either the current or next *string-literal* is a *raw-string*, or both, then the *raw-string*(s) is converted to not be raw as follows:
+
+            - The 'R' prefix is removed.
+
+            - The *d-char-sequence* delimiters on both ends are removed.
+
+            - Each newline character within the string is escaped by replacing it with the "\n" escape sequence.
+
+            - Concatenating the two *string-literals* then proceeds to (4.c) below.
+
+        c. The two strings are concatenated, and the *encoding-prefix* is set to the common *encoding-prefix* determined above.
+
+        d. The resulting single *other-string-literal* replaces the original *other-string-literal*s.
 
 Supporting Arbitrary Expressions
 ==========
 
 Some concerns were raised on the mailing list regarding allowing arbitrary expressions in the replacement-field, vs. only identifiers/lvalues.
 
-This same concerns also came up when python added f-strings. But full expressions were ultimately supported in python because they were deemed too useful to exclude.
+The same concerns also came up when python added f-strings. But full expressions were ultimately supported in python because they were deemed too useful to exclude.
 
 For example, the following types of uses would be very common:
 
@@ -391,9 +554,9 @@ As defined in this proposal, there is no customization available. For example on
 
 The user can instead invoke `fmt::format(X"...")` should they wish to, or even create a preprocessing function-like macro such as:
 ```cpp
-#define F(s) ::fmt::format(X##s)
+#define FMT(s) ::fmt::format(X##s)
 
-std::cout << F("iteration #{i + 1} out of {n}\n");
+std::cout << FMT("iteration #{i + 1} out of {n}\n");
 ```
 
 
