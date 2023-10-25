@@ -218,13 +218,32 @@ Syntactic ambiguity can arise due to the following:
 * Expressions can include double-quotes when string-literals are used in them, which would lead to more ambiguity issues.
 
 For example the first line of the following has a single colon `:` between `2` and `6`, which will be treated as separating an optional `format-spec`, and will thus convert but fail to compile later:
-```cpp
-    F"{check() ? 2 : 6}"; // ERROR: converts, but fails to compile later
-```
-Because the previous example converts to this:
-```cpp
-    ::std::format("{: 6}", check() ? 2); // ERROR
-```
+<table>
+<!-- header row -->
+<tr>
+    <th>Pre-processing</th> <th>Post-processing</th>
+</tr>
+<!-- first row begin -->
+<tr>
+<!-- first cell begin -->
+<td  valign="top">
+<pre lang="cpp">
+F"{check() ? 2 : 6}"; // ERROR
+</pre>
+</td>
+<!-- first cell end -->
+<!-- second cell begin -->
+<td  valign="top">
+<pre lang="cpp">
+::std::format("{: 6}", check() ? 2); // ERROR
+</pre>
+</td>
+<!-- second cell end -->
+</tr>
+<!-- first row end -->
+</table>
+
+
 
 The same issue arose for python (due to their lambda syntax), and their chosen solution was to require any such expression to be wrapped by parentheses.
 
