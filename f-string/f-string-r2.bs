@@ -7,11 +7,12 @@ Revision: 2
 Audience: EWG
 Status: D
 Group: WG21
-Date: 2023-10-10
+Date: 2023-10-25
 Markup Shorthands: markdown yes
 Markup Shorthands: biblio yes
 Repository: https://github.com/hadrielk/cpp-proposals.git
 Dark Mode: false
+URL: https://github.com/hadrielk/cpp-proposals/tree/main/f-string
 </pre>
 
 Motivation
@@ -113,7 +114,7 @@ Note: This proposal does not automatically make the definition of `std::format<>
 
 ## Terminology
 
-A formal grammar is descibed in later sections, but the relevant parts used throughout this document are shown here:
+A formal grammar is described in later sections, but the relevant parts used throughout this document are shown here:
 ```cpp
        F"The result is { get_result() :d}"
 //     ^~~~~~~~ f-string-literal ~~~~~~~~^
@@ -134,7 +135,7 @@ A formal grammar is descibed in later sections, but the relevant parts used thro
        X"The result is { get_result() :d}"
 //                      ^~~~~~~~~~~~~^^~^
 //                            |        |
-//              output-argument    format-specifier
+//               expression-field   format-specifier
 ```
 
 
@@ -221,14 +222,14 @@ For example the first line of the following has a single colon `:` between `2` a
 <table>
 <!-- header row -->
 <tr>
-    <th>Pre-processing</th> <th>Post-processing</th>
+    <th>Raw Source</th> <th>After Phase-4</th>
 </tr>
 <!-- first row begin -->
 <tr>
 <!-- first cell begin -->
 <td  valign="top">
 <pre lang="cpp">
-F"{check() ? 2 : 6}"; // ERROR
+F"{check() ? 2 : 6}";
 </pre>
 </td>
 <!-- first cell end -->
@@ -248,11 +249,69 @@ F"{check() ? 2 : 6}"; // ERROR
 The same issue arose for python (due to their lambda syntax), and their chosen solution was to require any such expression to be wrapped by parentheses.
 
 This proposal chooses that same solution:
-```cpp
-    F"{(check() ? 2 : 6)}";      // ok
-    F"{(check() ? 2 : 6):#04x}"; // ok
-    F"{(some_type{})}";          // ok
-```
+<table>
+<!-- header row -->
+<tr>
+    <th>Raw Source</th> <th>After Phase-4</th>
+</tr>
+<!-- 1 row begin -->
+<tr>
+<!-- first cell begin -->
+<td  valign="top">
+<pre lang="cpp">
+F"{(check() ? 2 : 6)}";
+</pre>
+</td>
+<!-- first cell end -->
+<!-- second cell begin -->
+<td  valign="top">
+<pre lang="cpp">
+::std::format("{}", check() ? 2 : 6); // ok
+</pre>
+</td>
+<!-- second cell end -->
+</tr>
+<!-- 1 row end -->
+
+<!-- 2 row begin -->
+<tr>
+<!-- first cell begin -->
+<td  valign="top">
+<pre lang="cpp">
+F"{(check() ? 2 : 6):#04x}";
+</pre>
+</td>
+<!-- first cell end -->
+<!-- second cell begin -->
+<td  valign="top">
+<pre lang="cpp">
+::std::format("{:#04x}", check() ? 2 : 6); // ok
+</pre>
+</td>
+<!-- second cell end -->
+</tr>
+<!-- 2 row end -->
+
+<!-- 3 row begin -->
+<tr>
+<!-- first cell begin -->
+<td  valign="top">
+<pre lang="cpp">
+F"{(some_type{})}";
+</pre>
+</td>
+<!-- first cell end -->
+<!-- second cell begin -->
+<td  valign="top">
+<pre lang="cpp">
+::std::format("{}", some_type{}); // ok
+</pre>
+</td>
+<!-- second cell end -->
+</tr>
+<!-- 3 row end -->
+</table>
+
 
 The rationale for this is that it is simple to parse and detect during preprocessing, and it remains consistent with python just as `std::format()` does.
 
@@ -261,14 +320,21 @@ The rationale for this is that it is simple to parse and detect during preproces
 
 There are syntax ambiguity issues if we allowed double-quotes.
 
-The Extract operator could keep track of double-quotes within the *extraction-field*, but it would require two-stage escaping to handle all cases:
+The Extract operator could keep track of double-quotes within the *extraction-field*, but it would require two-stage escaping to handle all cases, and it would be complicated to parse:
 ```cpp
-    F"{( func(\"\\\")}\") )}";
-    // same as above, but in raw-string form
-    FR"({( func("\")}") )})";
+    // desired result: get the three chars `")}` into func(), like so:
+    ::std::format( func( "\")}" ) );
+
+    // all of the following should generate the above expression,
+    // but they each use a different syntax/encoding to do it
+      F"{( func(  \"\\\")}\" ) )}";
+      F"{( func( R\"(\")})\" ) )}";
+    FR"({( func(  "\")}"     ) )})";
+    FR"({( func( R"=(")})="  ) )})";
+   FR"=({( func( R"(")})"    ) )})=";
 ```
 
-But that would require unescaping non-raw literals during parsing of the *interpolation-string*, just to determine where an *extraction-field* ends; as well as simultaneously tracking quoted regions to ignore delimiters within them.
+Parsing the above would require unescaping non-raw literals while parsing the *interpolation-string*, just to determine where an *extraction-field* actually ends; as well as simultaneously tracking quoted regions to ignore delimiters within them. And for nested braces within the *format-spec* portion, it's not clear if it is even technically possible.
 
 Furthermore, many programmers become confused by extra layers of escaping even today, for cases such as regex patterns.
 
@@ -291,7 +357,7 @@ Furthermore, some standardized and compiler-specific macros are widely used for 
 
 The preprocessor also offers a clean separation between what is and is not native C++ code. And the contents of the pre-interpolated string is *not* native C++ code (at least, not *yet*).
 
-Users also likely expect it to behave like textual transformation, as if it replaced the original string with new substrings of code. So this proposal does what users think it does.
+Programmers are also likely to expect it to behave like textual transformation, as if it replaced the original string with new substrings of code. So this proposal does what programmers think it does.
 
 Performing the interpolation within the preprocessor does have some drawbacks, however:
 
@@ -306,17 +372,18 @@ Performing the interpolation within the preprocessor does have some drawbacks, h
 
 ## Why do we need multiple preprocessor operators?
 
-This proposal is technically achievable with just one new operator: the Extract operator, which could just do the other operators' work internally.
+This proposal is technically achievable with no operators - the preprocessor could just do the operators' work implicitly. Or we could define only the Extract operator, and have it intenrally perform all the work.
 
 But separating the discrete steps into multiple operators provides several advantages:
 
 * It provides more flexibility for programmers who wish to create their own function-like macros. For example if their macro needs to perform other work in-between the steps, or only some of the steps.
 
+* It provides separate customization points, if the compiler implementation wishes to expose command options to override a specific operator with a custom one.
+
 * The Concat operator is generally useful by itself, since it can do things `##` cannot: it can concatenate *string-literals* during preprocessing, and it can concatenate *identifier*s with expanding macros. The former functionality can allow one to pass multiple *string-literals* to the Pragma operator, for example. The latter functionality avoids needing to use a level of macro indirection.
 
 * The Cook operator is generally useful by itself, since converting raw-strings to non-raw is a useful ability. For example the Pragma operator does not currently accept a raw-string *string-literal*, but can easily be used with one by invoking `_Pragma( _Cook(s) )`.
 
-* It provides separate customization points, if the compiler implementation wishes to expose command options to override a specific operator with a custom one.
 
 
 ## What about multiple literals? ## {#multi-literals}
@@ -426,18 +493,54 @@ When a *preprocessing-token* is a *f-string-literal*:
 
 
 For example:
-```cpp
-    LF"k={v}";
-    // logical processing steps
-    // 1. => L"k={v}";
-    // 2. => ::std::format( _Extract( _Concat( L"k={v}" ) ) );
+<table>
+<!-- header row -->
+<tr>
+    <th>Raw Source</th> <th>Processing Steps</th>
+</tr>
+<!-- 1 row begin -->
+<tr>
+<!-- first cell begin -->
+<td  valign="top">
+<pre lang="cpp">
+LF"k={v}";
+</pre>
+</td>
+<!-- first cell end -->
+<!-- second cell begin -->
+<td  valign="top">
+<ol>
+<li style="line-height:0;"><pre lang="cpp">L"k={v}";</pre></li>
+<li style="line-height:0;"><pre lang="cpp">::std::format( _Extract( _Concat( L"k={v}" ) ) );</pre></li>
+</ol>
+</td>
+<!-- second cell end -->
+</tr>
+<!-- 1 row end -->
 
-    F"a={i}" FR"b={j}" F"c={k}";
-    // logical processing steps
-    // 1. => "a={i}" R"b={j}" "c={k}"
-    // 2. => "a={i}", R"b={j}", "c={k}"
-    // 3. => ::std::format( _Extract( _Concat( "a={i}", R"b={j}", "c={k}" ) ) )
-```
+<!-- 2 row begin -->
+<tr>
+<!-- first cell begin -->
+<td  valign="top">
+<pre lang="cpp">
+F"a={i}" FR"b={j}" F"c={k}";
+</pre>
+</td>
+<!-- first cell end -->
+<!-- second cell begin -->
+<td  valign="top">
+<ol>
+<li style="line-height:0;"><pre lang="cpp">"a={i}" R"b={j}" "c={k}"</pre></li>
+<li style="line-height:0;"><pre lang="cpp">"a={i}", R"b={j}", "c={k}"</pre></li>
+<li style="line-height:0;"><pre lang="cpp">::std::format( _Extract( _Concat( "a={i}", R"b={j}", "c={k}" ) ) )</pre></li>
+</ol>
+</pre>
+</td>
+<!-- second cell end -->
+</tr>
+<!-- 2 row end -->
+</table>
+
 
 When a *preprocessing-token* is an *x-string-literal*:
 
@@ -448,19 +551,53 @@ When a *preprocessing-token* is an *x-string-literal*:
     3. The list of *string-literals* is then replaced by the macro-invocation of the `_Xstring()` macro with the comma-separated *string-literals* as arguments.
 
 For example:
-```cpp
-    LX"k={v}";
-    // logical processing steps
-    // 1. => L"k={v}";
-    // 2. => _Extract( _Concat( L"k={v}" ) );
+<table>
+<!-- header row -->
+<tr>
+    <th>Raw Source</th> <th>Processing Steps</th>
+</tr>
+<!-- 1 row begin -->
+<tr>
+<!-- first cell begin -->
+<td  valign="top">
+<pre lang="cpp">
+LX"k={v}";
+</pre>
+</td>
+<!-- first cell end -->
+<!-- second cell begin -->
+<td  valign="top">
+<ol>
+<li style="line-height:0;"><pre lang="cpp">L"k={v}";</pre></li>
+<li style="line-height:0;"><pre lang="cpp">_Extract( _Concat( L"k={v}" ) );</pre></li>
+</ol>
+</td>
+<!-- second cell end -->
+</tr>
+<!-- 1 row end -->
 
-    X"a={i}" XR"b={j}" X"c={k}";
-
-    // logical processing steps
-    // 1. => "a={i}" R"b={j}" "c={k}";
-    // 2. => "a={i}", R"b={j}", "c={k}";
-    // 3. => _Extract( _Concat( "a={i}", R"b={j}", "c={k}" ) );
-```
+<!-- 2 row begin -->
+<tr>
+<!-- first cell begin -->
+<td  valign="top">
+<pre lang="cpp">
+X"a={i}" XR"b={j}" X"c={k}";
+</pre>
+</td>
+<!-- first cell end -->
+<!-- second cell begin -->
+<td  valign="top">
+<ol>
+<li style="line-height:0;"><pre lang="cpp">"a={i}" R"b={j}" "c={k}"</pre></li>
+<li style="line-height:0;"><pre lang="cpp">"a={i}", R"b={j}", "c={k}"</pre></li>
+<li style="line-height:0;"><pre lang="cpp">_Extract( _Concat( "a={i}", R"b={j}", "c={k}" ) )</pre></li>
+</ol>
+</pre>
+</td>
+<!-- second cell end -->
+</tr>
+<!-- 2 row end -->
+</table>
 
 
 New Preprocessor Operators {#operators}
@@ -542,18 +679,36 @@ Before `_Concat()` invocation, the arguments are processed per the rules for Arg
 The Concat operator is usable within that substitution, and thus arguments may invoke `_Concat()` as well. Such concatenation would complete before the outer `_Concat()` would be invoked.
 
 For example:
-```cpp
-    #define prefix L
-    #define fmtstr(s) _Concat("{", s, "}")
+<table>
+<!-- header row -->
+<tr>
+    <th>Raw Source</th> <th>Processing Steps</th>
+</tr>
+<!-- first row begin -->
+<tr>
+<!-- first cell begin -->
+<td  valign="top">
+<pre lang="c">
+#define prefix L
+#define fmtstr(s) _Concat("{", s, "}")
 
-    _Concat( prefix, fmstr("bar") )
-
-    // logical processing steps
-    // 1. => _Concat( L, fmstr("bar") )
-    // 2. => _Concat( L, _Concat("{", "bar", "}") )
-    // 3. => _Concat( L, "{bar}" )
-    // 4. => L"{bar}"
-```
+_Concat( prefix, fmstr("bar") )
+</pre>
+</td>
+<!-- first cell end -->
+<!-- second cell begin -->
+<td  valign="top">
+<ol>
+<li style="line-height:0;"><pre lang="cpp">_Concat( L, fmstr("bar") )</pre></li>
+<li style="line-height:0;"><pre lang="cpp">_Concat( L, _Concat("{", "bar", "}") )</pre></li>
+<li style="line-height:0;"><pre lang="cpp">_Concat( L, "{bar}" )</pre></li>
+<li style="line-height:0;"><pre lang="cpp">L"{bar}"</pre></li>
+</ol>
+</td>
+<!-- second cell end -->
+</tr>
+<!-- first row end -->
+</table>
 
 After argument substitution is complete, the new *pp-tokens* must be valid *concat-args*, per the grammar rules listed earlier.
 
@@ -603,13 +758,13 @@ Each *string-literal* in the *string-literal-list* is processed sequentially as 
 
         - Any other combination is ill-formed.
 
-    3. If the current *string-literal* is a raw-string, then it is converted to non-raw as if the Cook operator were invoked with that *string-literal*.
+    3. If the current *string-literal* is a raw-string, then it is replaced by invoking the Cook operator with that *string-literal*, to make it non-raw. ([[#cook]])
 
-    4. If the next *string-literal* is a raw-string, then it is converted to non-raw as if the Cook operator were invoked with that *string-literal*.
+    4. If the next *string-literal* is a raw-string, then it is replaced by invoking the Cook operator with that *string-literal*, to make it non-raw. ([[#cook]])
 
-    4. The two character sequences are concatenated, wrapped in double-quotes, and the *encoding-prefix* is set to the common *encoding-prefix* determined above.
+    5. The two character sequences are concatenated, wrapped in double-quotes, and the *encoding-prefix* is set to the common *encoding-prefix* determined above.
 
-    5. The single resulting *string-literal* replaces the two original *string-literal*s.
+    6. The single resulting *string-literal* replaces the two original *string-literal*s.
 
 
 ## The Extract operator ## {#extract}
@@ -627,9 +782,9 @@ The following grammar is used in subsequent sections to describe Extract process
     ::    *fmt-char* *interpolation-string*
 
     : *extraction-field*:
-    ::    { *output-argument* *fmt-specifier*<sub>opt</sub> }
+    ::    { *expression-field* *fmt-specifier*<sub>opt</sub> }
 
-    : *output-argument*:
+    : *expression-field*:
     ::    ( *any member of the source character set except the double-quote or the matching right parenthesis* )
     ::    *any member of the source character set except the double-quote or colon*
 
@@ -671,23 +826,52 @@ The Extract operator can be used during macro expansion, as well as directly dur
 Before `_Extract()` invocation, any *pp-tokens* between the parentheses are processed per the rules for Argument Substitution [cpp.subst], as is done for arguments of function-like macros.
 
 For example:
-```cpp
-    #define S "{num}"
-    _Extract(S)
-    // logical processing steps
-    // 1. => _Extract( "{num}" )
-    // 2. => "{}", num
-```
+<table>
+<!-- header row -->
+<tr>
+    <th>Raw Source</th> <th>Processing Steps</th>
+</tr>
+<!-- first row begin -->
+<tr>
+<!-- first cell begin -->
+<td  valign="top">
+<pre lang="cpp">
+#define S "{num}"
+_Extract(S)
+</pre>
+</td>
+<!-- first cell end -->
+<!-- second cell begin -->
+<td  valign="top">
+<ol>
+<li style="line-height:0;"><pre lang="cpp">_Extract( "{num}" )</pre></li>
+<li style="line-height:0;"><pre lang="cpp">"{}", num</pre></li>
+</ol>
+</td>
+<!-- second cell end -->
+</tr>
+<!-- first row end -->
+</table>
 
-After argument substitution is complete, the character contents of the *string-literal* must match the syntax of *interpolation-string*, as defined by the grammar previously. The *string-literal* may be a raw-string, of any *encoding-prefix*.
+After argument substitution is complete, there must be only one *string-literal*, of any *encoding-prefix*, or the program is ill-formed.
 
-If the *string-literal* is a raw-string, it first converted to a non-raw as if the Cook operator were invoked with the *string-literal*.
+If the *string-literal* is a raw-string, it is replaced by invoking the Cook operator with the *string-literal*, to make it non-raw. ([[#cook]])
 
-Note: To describe the processing rules herein, the terms "output-string" and "output-arguments" are used. They do not represent tokens, but rather placeholders used during the processing of the *string-literal* to produce an intermediate character sequence, which will then be passed through phase-3 lexing.
+If the resulting *string-literal* has no *s-char*s (ie, is empty), then it replaces the original preprocessing tokens of the `_Extract` unary operator expression and Extract processing is complete.
 
-The contents of the characters within the *string-literal* are processed as if parsed into the grammar for *interpolation-string* described previously. Note that this includes handling of the *output-argument* field being wrapped in parentheses.
+Otherwise the *s-char-sequence* of the *string-literal* is handled as an *interpolation-string* per the grammar rules above. Note that this includes handling of the *expression-field* field being wrapped in parentheses. If it does not match the grammar for *interpolation-string*, the program is ill-formed.
 
-Each character that is not part of an *extraction-field* is copied verbatim into the output-string, including *fmt-escape*s.
+Note: To describe the processing rules for Extract, the terms "output-string" and "output-arguments" are used. They do not represent tokens, but rather placeholders used during the processing of the *interpolation-string* to produce an intermediate character sequence buffer, which will then be passed through phase-3 lexing.
+
+Processing involves iterating over the *interpolation-string*'s character sequence sequentially from left-to-right. Each iteration adds to the single output-string character sequence buffer, or creates output-arguments.
+
+Starting from the beginning of the *interpolation-string*:
+
+1. Each *fmt-char* that is not part of an *extraction-field* is copied verbatim into the output-string, including *fmt-escape*s.
+
+2. Whenever an *extraction-field* is encountered, that *extraction-field* - including its delimiting braces - is processed per the procedures in [[#extraction-field]].
+
+3. Processing then repeats back to step-1 above with the first character after the closing right-brace of the *extraction-field*, until all the characters of the *interpolation-string* have been processed.
 
     - Example: '`a \"{{( {b}`' becomes the output-string '`a \"{{( {}`' with output-argument '`b`'.
 
@@ -695,44 +879,58 @@ Each character that is not part of an *extraction-field* is copied verbatim into
 
     - Example: '`a{{b`' becomes the output-string '`a{{b`' with no output-arguments.
 
-Each *extraction-field* is processed as follows:
+The output-string is then wrapped in double-quotes, and the *encoding-prefix* of the output-string is set to the *encoding-prefix* of the original *string-literal*.
 
-    1. The opening left-brace of the *extraction-field* is copied to the output-string.
+Each new output-argument created by [[#extraction-field]], is then processed in fifo-order by appending a comma "`,`" followed by the output-argument to the end of the output-string.
 
-    2. The *output-argument*'s character sequence, ignoring a leading left-parentheses and matching trailing right-parenthesis, is processed as follows:
+    - Example: `"a"` becomes the output-string character sequence '`"a"`'.
 
-        - The character sequence is copied verbatim to an output-argument.
+    - Example: `L"{{{a}{b}"` becomes the output-string character sequence '`L"{{{}{}",a,b`'.
 
-        - The character sequence must not have a mismatching set of parentheses, or else the program is ill-formed.
+    - Example: `"pi={a:{w}.{p}f}{b}"` becomes the output-string character sequence '`"pi={:{}.{}f}{}",a,w,p,b`'.
 
-    3. If a *format-specifier* exists, its character sequence is processed as follows:
+The output-string character sequence is then processed through lexing translation phase-3 to produce a sequence of *preprocessing-token*s.
 
-        - The leading colon is copied to the output-string.
+    - The first resulting *preprocessing-token* must be a *string-literal* or the program is ill-formed.
 
-        - The character sequence must not have a mismatching set of parentheses, or else the program is ill-formed.
+The subsequent sequence of *preprocessing-token*s, if any, are then processed for macro-invocation expansion, as defined for translation phase-4.
 
-        - Each *fmt-spec-extract*'s character sequence is processed as an *output-argument* per (2) above.
+    - Preprocessing directives shall not be usable within this expansion even if the tokens resemble one.
 
-            - The opening left-brace and closing right-brace are copied to the output-string.
+    - The Cook, Concat, Extract, and Pragma operator expressions are usable.
 
-        - Any *fmt-spec-chars* not in a *fmt-spec-extract* are copied verbatim to the output-string.
-
-    4. The closing right-brace of the *extraction-field* is then also copied to the output-string.
+The resulting final sequence of preprocessing tokens then replace the original preprocessing tokens of the `_Extract` unary operator expression, and Extract processing is complete.
 
 
-The *encoding-prefix* of the original *string-literal* is set to the of *encoding-prefix* the output-string. Each new output-argument created by the above steps, causes a comma "`,`" and the output-argument to be appended after the output-string, after the closing double-quotes and any previous output-arguments.
+#### Extraction-field Processing #### {#extraction-field}
 
-    - Example: `L"{a}{b}"` becomes the character sequence '`L"{}{}", a, b`'.
+1. The opening left-brace of the *extraction-field* is copied to the output-string.
 
-    - Example: `"a"` becomes the character sequence '`"a"`'.
+2. The *expression-field*'s character sequence, ignoring a leading left-parentheses and matching trailing right-parenthesis, is processed as follows:
 
-After the *string-literal* has been converted to the separated output-string and output-arguments, theey are processed through lexing translation phase-3 to produce *preprocessing-token*s.
+    - The character sequence is copied to a new output-argument, but with the following transformation to "destringize" it:
 
-The resulting sequence of *preprocessing-token*s from lexing are then processed for macro-invocation expansion, as defined for translation phase-4.
+        - Each escaped newline "`\n`" is copied as a newline.
 
-Note: Preprocessing directives shall not be usable within this expansion even if the tokens resemble one; but all Cook, Concat, Extract, and Pragma operator expressions are usable.
+        - Each escaped double-quote "`\"`" is copied as only a double-quote.
 
-The resulting final sequence of preprocessing tokens then replace the original four preprocessing tokens of the `_Extract` unary operator expression.
+        - Each escaped backslash "`\\`" is copied as only a single backslash.
+
+    - The character sequence must not have a mismatching set of parentheses, or else the program is ill-formed.
+
+3. If a *format-specifier* exists, its character sequence is processed as follows:
+
+    - The leading colon is copied to the output-string.
+
+    - The character sequence must not have a mismatching set of parentheses, or else the program is ill-formed.
+
+    - Each *fmt-spec-extract*'s character sequence is processed as an *expression-field* per (2) above.
+
+        - The opening left-brace and closing right-brace are copied to the output-string.
+
+    - Any *fmt-spec-chars* not in a *fmt-spec-extract* are copied verbatim to the output-string.
+
+4. The closing right-brace of the *extraction-field* is then also copied to the output-string.
 
 
 Extending and Customizing
@@ -982,7 +1180,7 @@ Changes
 
 2. Changed the handling of the colon format-spec delimiter: in rev-0 the last standalone colon was considered the delimiter; whereas in rev-1 the *first* standalone colon is.
 
-    - This was done to follow the behavior of `std::format()`, to allow things like `F"The time is { chrono::system_clock::now() :HH:MM:SS}"`.
+    - This was done to follow the behavior of `std::format()`, to allow things like `F"The time is { chrono::system_clock::now() :%H:%M:%S}"`.
 
 3. Added the ability to use parentheses to wrap an expression, to avoid syntax ambiguity issues.
 
